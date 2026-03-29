@@ -1,0 +1,10 @@
+.streamlit/secrets.toml
+data/config.json
+data/ai_cache.json
+data/email_send_log.csv
+data/market_history.csv
+data/ic_note_history.csv
+data/trade_ideas_history.csv
+data/auto_run_log.txt
+__pycache__/
+*.pyc
