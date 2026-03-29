@@ -24,7 +24,7 @@ except Exception:
     yagmail = None
 
 
-APP_TITLE = "📊 Analyst Dashboard - CIO / IC / PM"
+APP_TITLE = "📊 Analyst Dashboard - TVAM"
 DEFAULT_MODEL = "gpt-4.1-mini"
 
 BASE_DIR = Path(".")
@@ -809,7 +809,7 @@ def main_streamlit():
 
     st.set_page_config(page_title=APP_TITLE, layout="wide")
     st.title(APP_TITLE)
-    st.caption("Song ngữ Việt - Anh | viết cho CIO / IC / PM | có thị trường VN, watchlist, link bài báo trong bảng")
+    st.caption("TVAM@2026")
 
     api_key_default = get_runtime_value(cfg.get("openai_api_key", ""), "OPENAI_API_KEY")
     sender_default = get_runtime_value(cfg.get("default_sender_email", ""), "SENDER_EMAIL")
