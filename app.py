@@ -24,7 +24,7 @@ except Exception:
     yagmail = None
 
 
-APP_TITLE = "📊 Analyst Dashboard"
+APP_TITLE = "📊 Analyst Dashboard - CIO / IC / PM"
 DEFAULT_MODEL = "gpt-4.1-mini"
 
 BASE_DIR = Path(".")
@@ -37,7 +37,6 @@ EMAIL_LOG_FILE = DATA_DIR / "email_send_log.csv"
 MARKET_HISTORY_FILE = DATA_DIR / "market_history.csv"
 IC_HISTORY_FILE = DATA_DIR / "ic_note_history.csv"
 TRADE_IDEAS_HISTORY_FILE = DATA_DIR / "trade_ideas_history.csv"
-AUTO_RUN_LOG_FILE = DATA_DIR / "auto_run_log.txt"
 
 DEFAULT_TICKERS = {
     "VNINDEX": "^VNINDEX",
@@ -166,7 +165,7 @@ def get_runtime_value(config_value: str, secret_name: str) -> str:
     return secret_val if secret_val else (config_value or "")
 
 
-def generate_with_openai(api_key: str, model: str, system_prompt: str, user_prompt: str, max_output_tokens: int = 1200) -> str:
+def generate_with_openai(api_key: str, model: str, system_prompt: str, user_prompt: str, max_output_tokens: int = 1400) -> str:
     client = OpenAI(api_key=api_key)
     response = client.responses.create(
         model=model,
@@ -177,7 +176,7 @@ def generate_with_openai(api_key: str, model: str, system_prompt: str, user_prom
     return getattr(response, "output_text", "").strip()
 
 
-def cached_ai_call(api_key: str, model: str, system_prompt: str, user_prompt: str, max_output_tokens: int = 1200) -> str:
+def cached_ai_call(api_key: str, model: str, system_prompt: str, user_prompt: str, max_output_tokens: int = 1400) -> str:
     if not ai_is_available(api_key):
         return ""
 
@@ -220,17 +219,14 @@ def fetch_market_snapshot(tickers: Dict[str, str]) -> pd.DataFrame:
 def fetch_vn_recommendation_watchlist() -> pd.DataFrame:
     tickers = DEFAULT_VN_PRODUCTS.get("VN Broker Favorites", [])
     rows = []
-
     for ticker in tickers:
         try:
             hist = yf.Ticker(ticker).history(period="5d", interval="1d", auto_adjust=False)
             if hist.empty or len(hist) < 2:
                 continue
-
             last_close = float(hist.iloc[-1]["Close"])
             prev_close = float(hist.iloc[-2]["Close"])
             change_pct = (last_close - prev_close) / prev_close * 100 if prev_close else None
-
             rows.append({
                 "Ticker": ticker,
                 "Price": round(last_close, 2),
@@ -239,7 +235,6 @@ def fetch_vn_recommendation_watchlist() -> pd.DataFrame:
             })
         except Exception:
             continue
-
     df = pd.DataFrame(rows)
     if not df.empty:
         df = df.sort_values(by="ChangePct", ascending=False).reset_index(drop=True)
@@ -248,9 +243,7 @@ def fetch_vn_recommendation_watchlist() -> pd.DataFrame:
 
 def detect_region(source: str, title: str, summary: str) -> str:
     source_l = (source or "").lower()
-    title_l = (title or "").lower()
-    summary_l = (summary or "").lower()
-    text = f"{source_l} {title_l} {summary_l}"
+    text = f"{source_l} {(title or '').lower()} {(summary or '').lower()}"
 
     vn_source_keywords = ["vnexpress", "vietstock", "cafef", "ndh", "stockbiz", "thoibaotaichinhvietnam"]
     vn_content_keywords = [
@@ -330,7 +323,7 @@ def build_market_highlights(market_df: pd.DataFrame) -> str:
     return "\n".join(f"- {r['Asset']}: {r['Price']} ({r['ChangePct']}%)" for _, r in market_df.iterrows())
 
 
-def build_vn_global_news_brief(news_df: pd.DataFrame, vn_top_n: int = 3, global_top_n: int = 3) -> str:
+def build_vn_global_news_brief(news_df: pd.DataFrame, vn_top_n: int = 4, global_top_n: int = 4) -> str:
     vn_df, global_df = split_news_by_region(news_df)
     lines = ["TIN VIỆT NAM / VIETNAM NEWS:"]
     if vn_df.empty:
@@ -348,7 +341,7 @@ def build_vn_global_news_brief(news_df: pd.DataFrame, vn_top_n: int = 3, global_
     return "\n".join(lines)
 
 
-def build_top_actionable_signals(news_df: pd.DataFrame, top_n: int = 3) -> str:
+def build_top_actionable_signals(news_df: pd.DataFrame, top_n: int = 5) -> str:
     if news_df.empty:
         return "- Không có tín hiệu. / No actionable signal."
     df = news_df.sort_values(by="VNImpact", ascending=False).head(top_n)
@@ -377,149 +370,139 @@ def get_market_bias(market_df: pd.DataFrame) -> str:
     return "Neutral"
 
 
-def fallback_morning_note(note_date: str, bias: str, market_df: pd.DataFrame, news_df: pd.DataFrame, user_news: str) -> str:
+def build_expert_fund_summary(user_expert_notes: str = "") -> str:
+    base = """
+- SSI: Ưu tiên theo dõi large caps, câu chuyện nâng hạng và dòng vốn quay lại / Focus on large caps, upgrade story and returning flows.
+- VNDirect: Theo dõi biến động lãi suất, tỷ giá, nhóm dẫn dắt trong nước / Monitor rates, FX and domestic leadership.
+- Quỹ / Funds: Ưu tiên allocation linh hoạt, quản trị risk chặt chẽ / Prefer flexible allocation and tight risk management.
+"""
+    if normalize_text(user_expert_notes):
+        base += "\n- Ghi chú thêm / Additional expert notes:\n" + normalize_text(user_expert_notes)[:1000]
+    return base
+
+
+def fallback_morning_note(note_date: str, bias: str, market_df: pd.DataFrame, news_df: pd.DataFrame, user_news: str, expert_notes: str) -> str:
     return f"""MORNING NOTE / BẢN TIN SÁNG - {note_date}
 
-1. Bối cảnh thị trường / Market Backdrop
+1. Global Fixed Income / Fixed Income toàn cầu
+- Theo dõi lợi suất và kỳ vọng chính sách vì dầu và USD đang ảnh hưởng mạnh đến định vị duration.
+- Monitor yields and policy expectations as oil and USD are materially influencing duration positioning.
+
+2. Vietnam Fixed Income / Fixed Income Việt Nam
+- Theo dõi tỷ giá, thanh khoản hệ thống và định hướng điều hành lãi suất.
+- Monitor FX, system liquidity, and domestic rate policy direction.
+
+3. Global Equity / Equity toàn cầu
+- Tâm lý cổ phiếu toàn cầu phụ thuộc vào risk-on/risk-off, dầu và lợi suất.
+- Global equity sentiment depends on risk-on/risk-off, oil and yields.
+
+4. Vietnam Equity / Equity Việt Nam
+- Tập trung vào nhóm dẫn dắt, thanh khoản và dòng vốn ngoại.
+- Focus on leadership sectors, liquidity and foreign flows.
+
+5. Commodity / FX
+- Dầu, vàng, USD và USD/VND là biến số chiến thuật quan trọng.
+- Oil, gold, USD and USD/VND are key tactical variables.
+
+6. Expert / Fund Recommendations Summary
+{build_expert_fund_summary(expert_notes)}
+
+7. CIO / IC / PM View and Actions
 - House view: {bias}
-- Thị trường cần thêm tín hiệu xác nhận trước khi nâng mạnh mức rủi ro.
-- The market needs more confirmation before materially increasing risk.
+- Ưu tiên allocation linh hoạt, chưa tăng mạnh rủi ro nếu xác nhận xu hướng chưa rõ.
+- Keep allocation flexible and avoid adding aggressive risk without clearer trend confirmation.
 
-2. Fixed Income
-- Theo dõi lãi suất, lợi suất và định hướng chính sách.
-- Monitor rates, yields and policy direction.
+8. Key news / Tin nổi bật
+{build_vn_global_news_brief(news_df, 4, 4)}
 
-3. Equity
-- Tập trung vào nhóm dẫn dắt, độ rộng và chất lượng dòng tiền.
-- Focus on leadership groups, breadth and flow quality.
-
-4. Commodity / FX
-- Dầu, vàng, USD và tỷ giá là biến số quan trọng cho tactical positioning.
-- Oil, gold, USD and FX remain key tactical variables.
-
-5. Góc nhìn CIO / CIO View
-- Ưu tiên allocation linh hoạt, chỉ tăng rủi ro khi xác nhận rõ hơn.
-- Keep allocation flexible and add risk only on clearer confirmation.
-
-6. Tin nổi bật / Key News
-{build_vn_global_news_brief(news_df, 3, 3)}
-
-7. Hành động đề xuất / Suggested Actions
-{build_top_actionable_signals(news_df, 3)}
-
-8. Ghi chú thêm / Additional Notes
-{user_news[:300] if user_news else "- Không có. / None."}
+9. Additional notes / Ghi chú thêm
+{user_news[:500] if user_news else "- Không có. / None."}
 """
 
 
-def fallback_closing_note(note_date: str, market_df: pd.DataFrame, news_df: pd.DataFrame) -> str:
+def fallback_closing_note(note_date: str, market_df: pd.DataFrame, news_df: pd.DataFrame, expert_notes: str) -> str:
     return f"""CLOSING NOTE / BẢN TIN CUỐI NGÀY - {note_date}
 
-1. Diễn biến cuối ngày / End-of-day Move
-{build_market_highlights(market_df)}
-
-2. Fixed Income
-- Kiểm tra lại diễn biến lợi suất và implication cho duration.
+1. Global Fixed Income / Fixed Income toàn cầu
+- Đánh giá lại biến động lợi suất và implication cho duration.
 - Reassess yield moves and implications for duration.
 
-3. Equity
-- Đánh giá thị trường có củng cố hay làm suy yếu view đầu ngày.
-- Assess whether the market strengthened or weakened the morning view.
+2. Vietnam Fixed Income / Fixed Income Việt Nam
+- Theo dõi tín hiệu tỷ giá và thanh khoản nội địa.
+- Monitor domestic FX and liquidity signals.
 
-4. Commodity / FX
-- Dầu, vàng, USD tiếp tục chi phối risk sentiment.
-- Oil, gold and USD continue to shape risk sentiment.
+3. Global Equity / Equity toàn cầu
+- Đánh giá liệu risk sentiment đang cải thiện hay xấu đi.
+- Assess whether risk sentiment is improving or deteriorating.
 
-5. Góc nhìn CIO / CIO View
-- Chưa nên thay đổi allocation mạnh nếu tín hiệu xác nhận còn yếu.
-- Avoid aggressive allocation shifts if confirmation remains weak.
+4. Vietnam Equity / Equity Việt Nam
+- Kiểm tra độ rộng, thanh khoản và nhóm dẫn dắt.
+- Check breadth, liquidity and leadership sectors.
 
-6. Kế hoạch cho phiên tới / Plan for Next Session
-- Theo dõi nhóm dẫn dắt, tỷ giá và biến động lãi suất.
-- Monitor leadership, FX and rate volatility.
+5. Commodity / FX
+- Dầu, vàng và USD tiếp tục là biến số lớn.
+- Oil, gold and USD remain major variables.
+
+6. Expert / Fund Recommendations Summary
+{build_expert_fund_summary(expert_notes)}
+
+7. Plan for next session / Kế hoạch phiên tới
+- Giữ kỷ luật position sizing và theo dõi tín hiệu xác nhận.
+- Maintain disciplined position sizing and monitor confirmation signals.
 """
 
 
 def fallback_ic_note(note_date: str, market_df: pd.DataFrame, news_df: pd.DataFrame, expert_notes: str) -> str:
     return f"""IC NOTE / GHI CHÚ IC - {note_date}
 
-1. Fixed Income
-- Cần theo dõi xu hướng lãi suất, lợi suất và duration stance.
-- Monitor rate direction, yields and duration stance.
+1. Global Fixed Income / Fixed Income toàn cầu
+- Duration view nên giữ trung lập cho tới khi biến động dầu và lợi suất dịu lại.
+- Duration stance should stay neutral until oil and yield volatility eases.
 
-2. Equity
-- Tập trung vào positioning, breadth và nhóm dẫn dắt.
-- Focus on positioning, breadth and leadership.
+2. Vietnam Fixed Income / Fixed Income Việt Nam
+- Ưu tiên theo dõi tỷ giá, thanh khoản và đường cong lợi suất.
+- Focus on FX, liquidity and local yield curve.
 
-3. Commodity / FX
-- Dầu, vàng, USD có ảnh hưởng lớn tới tactical allocation.
-- Oil, gold and USD matter for tactical allocation.
+3. Global Equity / Equity toàn cầu
+- Positioning nên linh hoạt theo mức độ risk-on/risk-off.
+- Positioning should remain flexible based on risk-on/risk-off conditions.
 
-4. Nhận định chuyên gia / Expert and Fund Views
-- {expert_notes[:500] if expert_notes else "Không có. / None."}
+4. Vietnam Equity / Equity Việt Nam
+- Ưu tiên large caps, nhóm dẫn dắt và câu chuyện nâng hạng.
+- Prefer large caps, leadership groups and the upgrade story.
 
-5. Góc nhìn CIO / CIO Deep Dive
-- Asset allocation cần cân bằng giữa phòng thủ và tăng trưởng.
-- Allocation should stay balanced between defense and growth.
-- Chỉ nên tăng risk khi xác suất thắng cải thiện rõ rệt.
-- Add risk only when the probability of success improves clearly.
+5. Commodity / FX
+- Dầu, vàng, USD và USD/VND tác động trực tiếp đến tactical allocation.
+- Oil, gold, USD and USD/VND directly affect tactical allocation.
 
-6. Tin nổi bật / Key News
-{build_vn_global_news_brief(news_df, 3, 3)}
+6. Expert / Fund Recommendations Summary
+{build_expert_fund_summary(expert_notes)}
+
+7. Portfolio implication / Hàm ý danh mục
+- Overweight có chọn lọc ở equity Việt Nam, neutral duration, theo dõi commodity shock.
+- Selective overweight in Vietnam equities, neutral duration, monitor commodity shock.
 """
 
 
-def fallback_trade_ideas(market_df: pd.DataFrame, news_df: pd.DataFrame, ideas_count: int = 5) -> str:
-    vn_products = "\n".join([f"- {x}" for group in DEFAULT_VN_PRODUCTS.values() for x in group[:3]])
-    return f"""TRADE IDEAS ƯU TIÊN VIỆT NAM / VIETNAM-FOCUSED TRADE IDEAS
+def generate_morning_note(api_key: str, model: str, note_date: str, bias: str, market_df: pd.DataFrame, news_df: pd.DataFrame, user_news: str, expert_notes: str) -> str:
+    system_prompt = """You are a strategist supporting a CIO / IC / portfolio manager in Vietnam.
 
-1. VNINDEX / ETF Việt Nam
-- Hướng hành động / Direction: Theo dõi mua khi tín hiệu cải thiện / Watch for tactical long on improving signals
-- Luận điểm / Thesis: Đại diện tốt nhất cho xu hướng chung / Best proxy for broad market direction
-- Rủi ro / Risk: Biến động ngắn hạn / Short-term volatility
-- Score: 7
-- Confidence: Medium
-
-2. Nhóm ngân hàng Việt Nam / Vietnam banks
-- Hướng hành động / Direction: Ưu tiên theo dõi / Positive watchlist
-- Luận điểm / Thesis: Có thể dẫn dắt chỉ số / Potential market leadership
-- Rủi ro / Risk: Áp lực lãi suất, tín dụng / Rate and credit pressure
-- Score: 7
-- Confidence: Medium
-
-3. FPT / công nghệ Việt Nam
-- Hướng hành động / Direction: Quan sát tích cực / Constructive watch
-- Luận điểm / Thesis: Câu chuyện tăng trưởng rõ hơn mặt bằng chung / Clearer growth profile
-- Rủi ro / Risk: Định giá / Valuation
-- Score: 8
-- Confidence: Medium
-
-4. USD/VND
-- Hướng hành động / Direction: Theo dõi phòng thủ / Defensive monitor
-- Luận điểm / Thesis: Tỷ giá ảnh hưởng tâm lý và định vị rủi ro / FX shapes sentiment and risk positioning
-- Rủi ro / Risk: Biến động chính sách / Policy shifts
-- Score: 6
-- Confidence: Medium
-
-5. Vàng / dầu tác động tới Việt Nam
-- Hướng hành động / Direction: Theo dõi chiến thuật / Tactical monitoring
-- Luận điểm / Thesis: Tác động tới lạm phát và sentiment / Impacts inflation and sentiment
-- Rủi ro / Risk: Nhiễu ngắn hạn / Short-term noise
-- Score: 5
-- Confidence: Medium
-
-Sản phẩm Việt Nam tham khảo / Vietnam product universe:
-{vn_products}
-
-Tín hiệu / Signals:
-{build_top_actionable_signals(news_df, min(ideas_count, 3))}
-"""
-
-
-def generate_morning_note(api_key: str, model: str, note_date: str, bias: str, market_df: pd.DataFrame, news_df: pd.DataFrame, user_news: str) -> str:
-    system_prompt = """You are a market strategist supporting a CIO in Vietnam.
 Write a STRICTLY BILINGUAL Vietnamese-English Morning Note.
-Every heading must be bilingual. Every bullet must contain both Vietnamese and English.
+
+Required structure:
+1. Global Fixed Income / Fixed Income toàn cầu
+2. Vietnam Fixed Income / Fixed Income Việt Nam
+3. Global Equity / Equity toàn cầu
+4. Vietnam Equity / Equity Việt Nam
+5. Commodity / FX
+6. Expert / Fund Recommendations Summary
+7. CIO / IC / PM View and Actions
+
+Rules:
+- Every heading must be bilingual.
+- Every bullet must contain both Vietnamese and English.
+- Focus on the latest market implications.
+- Mention allocation implication, duration view, equity positioning, commodity implication.
 """
     user_prompt = f"""
 Date: {note_date}
@@ -529,22 +512,38 @@ MARKET:
 {build_market_highlights(market_df)}
 
 NEWS:
-{build_vn_global_news_brief(news_df, 3, 3)}
+{build_vn_global_news_brief(news_df, 4, 4)}
 
 SIGNALS:
-{build_top_actionable_signals(news_df, 3)}
+{build_top_actionable_signals(news_df, 5)}
+
+EXPERT / FUND VIEWS:
+{build_expert_fund_summary(expert_notes)}
 
 USER NOTES:
-{normalize_text(user_news)[:300]}
+{normalize_text(user_news)[:500]}
 """
-    out = cached_ai_call(api_key, model, system_prompt, user_prompt, 1400)
-    return out if out else fallback_morning_note(note_date, bias, market_df, news_df, user_news)
+    out = cached_ai_call(api_key, model, system_prompt, user_prompt, 1700)
+    return out if out else fallback_morning_note(note_date, bias, market_df, news_df, user_news, expert_notes)
 
 
-def generate_closing_note(api_key: str, model: str, note_date: str, market_df: pd.DataFrame, news_df: pd.DataFrame) -> str:
-    system_prompt = """You are an end-of-day strategist supporting a CIO in Vietnam.
+def generate_closing_note(api_key: str, model: str, note_date: str, market_df: pd.DataFrame, news_df: pd.DataFrame, expert_notes: str) -> str:
+    system_prompt = """You are an end-of-day strategist supporting a CIO / IC / portfolio manager in Vietnam.
+
 Write a STRICTLY BILINGUAL Vietnamese-English Closing Note.
-Every heading must be bilingual. Every bullet must contain both Vietnamese and English.
+
+Required structure:
+1. Global Fixed Income / Fixed Income toàn cầu
+2. Vietnam Fixed Income / Fixed Income Việt Nam
+3. Global Equity / Equity toàn cầu
+4. Vietnam Equity / Equity Việt Nam
+5. Commodity / FX
+6. Expert / Fund Recommendations Summary
+7. Changes vs Morning / What Changed and Next Session Plan
+
+Rules:
+- Every heading must be bilingual.
+- Every bullet must contain both Vietnamese and English.
 """
     user_prompt = f"""
 Date: {note_date}
@@ -553,16 +552,33 @@ MARKET:
 {build_market_highlights(market_df)}
 
 NEWS:
-{build_vn_global_news_brief(news_df, 3, 3)}
+{build_vn_global_news_brief(news_df, 4, 4)}
+
+EXPERT / FUND VIEWS:
+{build_expert_fund_summary(expert_notes)}
 """
-    out = cached_ai_call(api_key, model, system_prompt, user_prompt, 1400)
-    return out if out else fallback_closing_note(note_date, market_df, news_df)
+    out = cached_ai_call(api_key, model, system_prompt, user_prompt, 1700)
+    return out if out else fallback_closing_note(note_date, market_df, news_df, expert_notes)
 
 
 def generate_ic_note(api_key: str, model: str, note_date: str, market_df: pd.DataFrame, news_df: pd.DataFrame, expert_notes: str) -> str:
-    system_prompt = """You are a PM/strategist supporting a CIO in Vietnam.
-Write a STRICTLY BILINGUAL Vietnamese-English IC/PM Note.
-Every heading must be bilingual. Every bullet must contain both Vietnamese and English.
+    system_prompt = """You are a PM / strategist supporting a CIO / IC / portfolio manager in Vietnam.
+
+Write a STRICTLY BILINGUAL Vietnamese-English IC / PM Note.
+
+Required structure:
+1. Global Fixed Income / Fixed Income toàn cầu
+2. Vietnam Fixed Income / Fixed Income Việt Nam
+3. Global Equity / Equity toàn cầu
+4. Vietnam Equity / Equity Việt Nam
+5. Commodity / FX
+6. Expert / Fund Recommendations Summary
+7. Portfolio implication / Suggested IC actions
+
+Rules:
+- Every heading must be bilingual.
+- Every bullet must contain both Vietnamese and English.
+- Explicitly mention overweight / neutral / underweight when appropriate.
 """
     user_prompt = f"""
 Date: {note_date}
@@ -571,25 +587,28 @@ MARKET:
 {build_market_highlights(market_df)}
 
 NEWS:
-{build_vn_global_news_brief(news_df, 3, 3)}
+{build_vn_global_news_brief(news_df, 4, 4)}
 
-EXPERT NOTES:
-{normalize_text(expert_notes)[:800]}
+EXPERT / FUND VIEWS:
+{build_expert_fund_summary(expert_notes)}
 """
-    out = cached_ai_call(api_key, model, system_prompt, user_prompt, 1500)
+    out = cached_ai_call(api_key, model, system_prompt, user_prompt, 1800)
     return out if out else fallback_ic_note(note_date, market_df, news_df, expert_notes)
 
 
 def generate_trade_ideas(api_key: str, model: str, market_df: pd.DataFrame, news_df: pd.DataFrame, ideas_count: int = 5) -> str:
     if news_df.empty:
-        return fallback_trade_ideas(market_df, news_df, ideas_count)
+        return "Chưa có dữ liệu trade ideas / No trade idea data."
 
     vn_products_text = "\n".join(f"- {group}: {', '.join(items)}" for group, items in DEFAULT_VN_PRODUCTS.items())
-    system_prompt = """You are a CIO/PM in Vietnam.
+    system_prompt = """You are a CIO / PM in Vietnam.
+
 Write Vietnam-focused trade ideas in bilingual Vietnamese-English format.
-Prioritize Vietnamese assets and products.
-Include Asset/Product, Direction, Thesis, Risk, Score, Confidence.
-Max 5 ranked ideas.
+
+Requirements:
+- prioritize Vietnamese assets and products
+- include: Asset/Product, Direction, Thesis, Risk, Score, Confidence
+- max 5 ranked ideas
 """
     user_prompt = f"""
 Ideas count: {ideas_count}
@@ -598,16 +617,34 @@ MARKET:
 {build_market_highlights(market_df)}
 
 NEWS:
-{build_vn_global_news_brief(news_df, 3, 3)}
+{build_vn_global_news_brief(news_df, 4, 4)}
 
 SIGNALS:
-{build_top_actionable_signals(news_df, 3)}
+{build_top_actionable_signals(news_df, 5)}
 
 VIETNAM PRODUCT UNIVERSE:
 {vn_products_text}
 """
-    out = cached_ai_call(api_key, model, system_prompt, user_prompt, 1000)
-    return out if out else fallback_trade_ideas(market_df, news_df, ideas_count)
+    out = cached_ai_call(api_key, model, system_prompt, user_prompt, 1200)
+    if out:
+        return out
+
+    return """TRADE IDEAS / Ý TƯỞNG ĐẦU TƯ
+
+1. VNINDEX / ETF Việt Nam
+- Direction / Hướng hành động: Theo dõi mua khi tín hiệu cải thiện / Watch for tactical long on improving signals
+- Thesis / Luận điểm: Đại diện tốt cho xu hướng chung / Good proxy for broad market direction
+- Risk / Rủi ro: Biến động ngắn hạn / Short-term volatility
+- Score: 7
+- Confidence: Medium
+
+2. Nhóm ngân hàng Việt Nam / Vietnam banks
+- Direction / Hướng hành động: Theo dõi tích cực / Positive watch
+- Thesis / Luận điểm: Có thể dẫn dắt thị trường / Potential market leadership
+- Risk / Rủi ro: Áp lực tín dụng và lãi suất / Credit and rate pressure
+- Score: 7
+- Confidence: Medium
+"""
 
 
 def extract_top_idea(trade_ideas_text: str) -> str:
@@ -618,18 +655,21 @@ def extract_top_idea(trade_ideas_text: str) -> str:
     if blocks:
         return blocks[0]
     lines = [x.strip() for x in text.splitlines() if x.strip()]
-    return "\n".join(lines[:6]) if lines else "Chưa có ý tưởng nổi bật / No top idea available."
+    return "\n".join(lines[:8]) if lines else "Chưa có ý tưởng nổi bật / No top idea available."
 
 
 def generate_email_body(api_key: str, model: str, core_note: str, report_date: str, run_label: str) -> Tuple[str, str]:
     subject = f"[{run_label}] Cập nhật thị trường | Market Update - {report_date}"
     system_prompt = """Write a STRICTLY BILINGUAL Vietnamese-English market update email.
-Greeting must be bilingual. Every major paragraph must contain both Vietnamese and English.
-End with:
+
+Rules:
+- Greeting must be bilingual.
+- Every major paragraph must contain both Vietnamese and English.
+- End with:
 Trân trọng.
 Best regards.
 """
-    out = cached_ai_call(api_key, model, system_prompt, core_note[:2800], 900)
+    out = cached_ai_call(api_key, model, system_prompt, core_note[:3000], 1000)
     if out:
         return subject, out
 
@@ -685,17 +725,13 @@ def save_trade_ideas_history(note_date: str, trade_ideas: str) -> None:
 
 def build_email_bundle(api_key: str, model: str, report_date: str, run_label: str, core_note: str, ic_note: str, trade_ideas: str) -> Tuple[str, str]:
     subject, body = generate_email_body(api_key, model, core_note, report_date, run_label)
-
     top_idea = extract_top_idea(trade_ideas)
     if top_idea:
         body += "\n\n=== Ý tưởng đầu tư nổi bật | Top Trade Idea ===\n" + top_idea
-
     if trade_ideas:
         body += "\n\n=== Danh sách Trade Ideas | Full Trade Ideas ===\n" + trade_ideas
-
     if ic_note:
         body += "\n\n=== IC Note ===\n" + ic_note
-
     return subject, body
 
 
@@ -704,8 +740,8 @@ def run_all_pipeline(api_key: str, model: str, report_date: str, cfg: dict, user
     news_df = fetch_rss_news(RSS_FEEDS, max_per_feed=6)
     news_df_ai = filter_news_for_ai(news_df, smart_mode=cfg.get("smart_mode", True))
 
-    morning_note = generate_morning_note(api_key, model, report_date, cfg.get("house_view", "Neutral"), market_df, news_df_ai, user_news)
-    closing_note = generate_closing_note(api_key, model, report_date, market_df, news_df_ai)
+    morning_note = generate_morning_note(api_key, model, report_date, cfg.get("house_view", "Neutral"), market_df, news_df_ai, user_news, expert_notes)
+    closing_note = generate_closing_note(api_key, model, report_date, market_df, news_df_ai, expert_notes)
     ic_note = generate_ic_note(api_key, model, report_date, market_df, news_df_ai, expert_notes)
     trade_ideas = generate_trade_ideas(api_key, model, market_df, news_df_ai, int(cfg.get("trade_ideas_count", 5)))
     email_subject, email_body = build_email_bundle(api_key, model, report_date, "MANUAL", morning_note, ic_note, trade_ideas)
@@ -729,40 +765,22 @@ def run_auto_job() -> None:
 
     api_key = get_runtime_value(cfg.get("openai_api_key", ""), "OPENAI_API_KEY")
     model = cfg.get("model", DEFAULT_MODEL)
-    house_view = cfg.get("house_view", "Neutral")
     sender = get_runtime_value(cfg.get("default_sender_email", ""), "SENDER_EMAIL")
     password = get_runtime_value(cfg.get("default_sender_password", ""), "SENDER_PASSWORD")
     recipients_raw = get_runtime_value(cfg.get("default_recipients", ""), "DEFAULT_RECIPIENTS")
     recipients = [x.strip() for x in recipients_raw.replace(";", ",").split(",") if x.strip()]
-    smart_mode = bool(cfg.get("smart_mode", True))
-    trade_ideas_count = int(cfg.get("trade_ideas_count", 5))
     expert_notes = cfg.get("auto_expert_notes", "")
     user_news = cfg.get("auto_user_news", "")
 
-    now = datetime.now()
-    report_date = now.strftime("%Y-%m-%d")
-    run_label = "08:00" if now.hour < 12 else "16:00"
+    report_date = datetime.now().strftime("%Y-%m-%d")
+    result = run_all_pipeline(api_key, model, report_date, cfg, user_news, expert_notes)
 
-    append_auto_log("START auto run")
+    ok, msg = send_email_yagmail(sender, password, recipients, result["email_subject"], result["email_body"])
+    log_email_send(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), sender, recipients, result["email_subject"], "OK" if ok else "ERROR", "" if ok else msg)
 
-    market_df = fetch_market_snapshot(DEFAULT_TICKERS)
-    news_df = fetch_rss_news(RSS_FEEDS, max_per_feed=6)
-    news_df_ai = filter_news_for_ai(news_df, smart_mode=smart_mode)
-
-    core_note = generate_morning_note(api_key, model, report_date, house_view, market_df, news_df_ai, user_news) if run_label == "08:00" else generate_closing_note(api_key, model, report_date, market_df, news_df_ai)
-    ic_note = generate_ic_note(api_key, model, report_date, market_df, news_df_ai, expert_notes)
-    trade_ideas = generate_trade_ideas(api_key, model, market_df, news_df_ai, trade_ideas_count)
-
-    subject, body = build_email_bundle(api_key, model, report_date, run_label, core_note, ic_note, trade_ideas)
-
-    ok, msg = send_email_yagmail(sender, password, recipients, subject, body)
-    log_email_send(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), sender, recipients, subject, "OK" if ok else "ERROR", "" if ok else msg)
-
-    save_market_history(report_date, core_note if run_label == "08:00" else "", core_note if run_label == "16:00" else "")
-    save_ic_history(report_date, ic_note)
-    save_trade_ideas_history(report_date, trade_ideas)
-
-    append_auto_log(f"END auto run | {run_label}")
+    save_market_history(report_date, result["morning_note"], result["closing_note"])
+    save_ic_history(report_date, result["ic_note"])
+    save_trade_ideas_history(report_date, result["trade_ideas"])
 
 
 def init_session():
@@ -791,7 +809,7 @@ def main_streamlit():
 
     st.set_page_config(page_title=APP_TITLE, layout="wide")
     st.title(APP_TITLE)
-    st.caption("TVAM©2026")
+    st.caption("Song ngữ Việt - Anh | viết cho CIO / IC / PM | có thị trường VN, watchlist, link bài báo trong bảng")
 
     api_key_default = get_runtime_value(cfg.get("openai_api_key", ""), "OPENAI_API_KEY")
     sender_default = get_runtime_value(cfg.get("default_sender_email", ""), "SENDER_EMAIL")
@@ -828,7 +846,7 @@ def main_streamlit():
         st.sidebar.success("Đã lưu config.")
 
     st.session_state["user_news"] = st.text_area("Tin bổ sung / Additional notes", value=st.session_state.get("user_news", ""), height=90)
-    st.session_state["expert_notes"] = st.text_area("Expert notes / Ghi chú chuyên gia", value=st.session_state.get("expert_notes", ""), height=90)
+    st.session_state["expert_notes"] = st.text_area("Khuyến nghị chuyên gia / quỹ / Expert & fund recommendations", value=st.session_state.get("expert_notes", ""), height=120)
 
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -876,8 +894,6 @@ def main_streamlit():
             vn_watch_df = fetch_vn_recommendation_watchlist()
             if not vn_watch_df.empty:
                 st.dataframe(vn_watch_df, use_container_width=True)
-            else:
-                st.info("Chưa lấy được dữ liệu watchlist cổ phiếu Việt Nam.")
 
         if not st.session_state["news_df"].empty:
             vn_df, global_df = split_news_by_region(st.session_state["news_df"])
@@ -907,37 +923,51 @@ def main_streamlit():
                 else:
                     st.info("Không có tin quốc tế.")
 
-            st.text_area("Signals / Tín hiệu", build_top_actionable_signals(st.session_state["news_df_ai"], 3), height=100)
+            st.text_area("Signals / Tín hiệu", build_top_actionable_signals(st.session_state["news_df_ai"], 5), height=120)
 
     with tabs[1]:
         a, b, c = st.columns(3)
         with a:
             if st.button("Generate Morning Note", use_container_width=True):
-                st.session_state["morning_note"] = generate_morning_note(api_key, model, report_date, house_view, st.session_state["market_df"], st.session_state["news_df_ai"], st.session_state["user_news"])
+                st.session_state["morning_note"] = generate_morning_note(
+                    api_key, model, report_date, house_view,
+                    st.session_state["market_df"], st.session_state["news_df_ai"],
+                    st.session_state["user_news"], st.session_state["expert_notes"]
+                )
         with b:
             if st.button("Generate Closing Note", use_container_width=True):
-                st.session_state["closing_note"] = generate_closing_note(api_key, model, report_date, st.session_state["market_df"], st.session_state["news_df_ai"])
+                st.session_state["closing_note"] = generate_closing_note(
+                    api_key, model, report_date,
+                    st.session_state["market_df"], st.session_state["news_df_ai"],
+                    st.session_state["expert_notes"]
+                )
         with c:
             if st.button("Generate IC Note", use_container_width=True):
-                st.session_state["ic_note"] = generate_ic_note(api_key, model, report_date, st.session_state["market_df"], st.session_state["news_df_ai"], st.session_state["expert_notes"])
+                st.session_state["ic_note"] = generate_ic_note(
+                    api_key, model, report_date,
+                    st.session_state["market_df"], st.session_state["news_df_ai"],
+                    st.session_state["expert_notes"]
+                )
 
         if st.session_state["morning_note"]:
-            st.text_area("Morning Note (Song ngữ Việt - Anh)", st.session_state["morning_note"], height=340)
+            st.text_area("Morning Note (Song ngữ Việt - Anh)", st.session_state["morning_note"], height=360)
         if st.session_state["closing_note"]:
-            st.text_area("Closing Note (Song ngữ Việt - Anh)", st.session_state["closing_note"], height=340)
+            st.text_area("Closing Note (Song ngữ Việt - Anh)", st.session_state["closing_note"], height=360)
         if st.session_state["ic_note"]:
-            st.text_area("IC Note (Song ngữ Việt - Anh)", st.session_state["ic_note"], height=380)
+            st.text_area("IC Note (Song ngữ Việt - Anh)", st.session_state["ic_note"], height=420)
 
     with tabs[2]:
         st.markdown("#### Trade Ideas ưu tiên sản phẩm / tài sản ở Việt Nam")
         st.write(", ".join([x for group in DEFAULT_VN_PRODUCTS.values() for x in group[:6]]))
 
         if st.button("Generate Trade Ideas", use_container_width=True):
-            st.session_state["trade_ideas"] = generate_trade_ideas(api_key, model, st.session_state["market_df"], st.session_state["news_df_ai"], int(trade_ideas_count))
+            st.session_state["trade_ideas"] = generate_trade_ideas(
+                api_key, model, st.session_state["market_df"], st.session_state["news_df_ai"], int(trade_ideas_count)
+            )
 
         if st.session_state["trade_ideas"]:
             st.text_area("Trade Ideas", st.session_state["trade_ideas"], height=340)
-            st.text_area("Top Idea", extract_top_idea(st.session_state["trade_ideas"]), height=110)
+            st.text_area("Top Idea", extract_top_idea(st.session_state["trade_ideas"]), height=120)
 
     with tabs[3]:
         base_note = st.session_state["morning_note"] or st.session_state["closing_note"] or ""
@@ -952,7 +982,7 @@ def main_streamlit():
             st.session_state["email_body"] = body
 
         st.session_state["email_subject"] = st.text_input("Subject / Tiêu đề", value=st.session_state.get("email_subject", ""))
-        st.session_state["email_body"] = st.text_area("Body / Nội dung", value=st.session_state.get("email_body", ""), height=280)
+        st.session_state["email_body"] = st.text_area("Body / Nội dung", value=st.session_state.get("email_body", ""), height=300)
 
         if st.button("Send Email Now", use_container_width=True):
             recipients_list = [x.strip() for x in recipients.replace(";", ",").split(",") if x.strip()]
