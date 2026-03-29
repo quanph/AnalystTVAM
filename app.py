@@ -24,7 +24,7 @@ except Exception:
     yagmail = None
 
 
-APP_TITLE = "📊 Analyst Dashboard v5.6 - CIO Bilingual"
+APP_TITLE = "📊 Analyst Dashboard"
 DEFAULT_MODEL = "gpt-4.1-mini"
 
 BASE_DIR = Path(".")
