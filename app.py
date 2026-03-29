@@ -791,7 +791,7 @@ def main_streamlit():
 
     st.set_page_config(page_title=APP_TITLE, layout="wide")
     st.title(APP_TITLE)
-    st.caption("Bản deploy Streamlit Cloud | song ngữ Việt-Anh | có link bài báo trong bảng")
+    st.caption("TVAM©2026")
 
     api_key_default = get_runtime_value(cfg.get("openai_api_key", ""), "OPENAI_API_KEY")
     sender_default = get_runtime_value(cfg.get("default_sender_email", ""), "SENDER_EMAIL")
