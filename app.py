@@ -24,7 +24,7 @@ except Exception:
     yagmail = None
 
 
-APP_TITLE = "📊 Analyst Dashboard v6.1 - CIO / IC / PM"
+APP_TITLE = "📊 Analyst Dashboard - TVAM- Nhung"
 DEFAULT_MODEL = "gpt-4.1-mini"
 
 BASE_DIR = Path(".")
@@ -861,7 +861,7 @@ CURRENT ALLOCATION ENGINE OUTPUT:
 
 
 def generate_ic_note(api_key: str, model: str, note_date: str, market_df: pd.DataFrame, news_df: pd.DataFrame, expert_notes: str, allocation_text: str) -> str:
-    system_prompt = """You are a PM strategist writing for CIO / Investment Committee / Portfolio Managers.
+    system_prompt = """You are a PM strategist writing for Investment Committee / Portfolio Managers.
 
 Write a STRICTLY BILINGUAL Vietnamese-English IC / PM Note.
 
