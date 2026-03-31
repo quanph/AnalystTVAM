@@ -1105,7 +1105,7 @@ def main_streamlit():
 
     st.set_page_config(page_title=APP_TITLE, layout="wide")
     st.title(APP_TITLE)
-    st.caption("v6.1 | Allocation Engine + Trade Idea Scoring | Ẩn OpenAI API Key và App Password")
+    st.caption("TVAM@2026")
 
     api_key = get_secret("OPENAI_API_KEY", "")
     sender = get_secret("SENDER_EMAIL", "")
