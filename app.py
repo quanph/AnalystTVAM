@@ -3,11 +3,12 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import math
 import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import feedparser
 import pandas as pd
@@ -33,8 +34,8 @@ try:
     from reportlab.lib.pagesizes import A4
     from reportlab.pdfgen import canvas
 except Exception:
-    canvas = None
     A4 = None
+    canvas = None
 
 try:
     from apscheduler.schedulers.background import BackgroundScheduler
@@ -47,7 +48,7 @@ except Exception:
     bcrypt = None
 
 
-APP_TITLE = "📊 Analyst Dashboard v6.2 - Independent App"
+APP_TITLE = "📊 Analyst Dashboard v6.4 - Independent Investment App"
 DEFAULT_MODEL = "gpt-4.1-mini"
 
 BASE_DIR = Path(".")
@@ -56,13 +57,14 @@ DATA_DIR.mkdir(exist_ok=True)
 
 CONFIG_FILE = DATA_DIR / "config.json"
 CACHE_FILE = DATA_DIR / "ai_cache.json"
+USERS_FILE = DATA_DIR / "users.json"
+RECIPIENT_GROUPS_FILE = DATA_DIR / "recipient_groups.json"
+
 EMAIL_LOG_FILE = DATA_DIR / "email_send_log.csv"
+AUDIT_LOG_FILE = DATA_DIR / "audit_log.csv"
 MARKET_HISTORY_FILE = DATA_DIR / "market_history.csv"
 IC_HISTORY_FILE = DATA_DIR / "ic_note_history.csv"
 TRADE_IDEAS_HISTORY_FILE = DATA_DIR / "trade_ideas_history.csv"
-USERS_FILE = DATA_DIR / "users.json"
-RECIPIENT_GROUPS_FILE = DATA_DIR / "recipient_groups.json"
-AUDIT_LOG_FILE = DATA_DIR / "audit_log.csv"
 
 DEFAULT_TICKERS = {
     "VNINDEX": "^VNINDEX",
@@ -80,6 +82,19 @@ DEFAULT_VN_PRODUCTS = {
     "VN Equity - Large Cap": ["FPT.VN", "VCB.VN", "HPG.VN", "MBB.VN", "SSI.VN", "VHM.VN", "GAS.VN"],
     "VN Broker Favorites": ["FPT.VN", "MWG.VN", "ACB.VN", "TCB.VN", "VCB.VN", "SSI.VN", "HPG.VN", "PNJ.VN"],
 }
+
+VN_EXPERT_RECOMMENDATIONS = [
+    {"ticker": "FPT", "action": "Buy", "source": "SSI"},
+    {"ticker": "FPT", "action": "Buy", "source": "VNDirect"},
+    {"ticker": "FPT", "action": "Buy", "source": "Fund"},
+    {"ticker": "VCB", "action": "Buy", "source": "Broker"},
+    {"ticker": "VCB", "action": "Buy", "source": "Fund"},
+    {"ticker": "MBB", "action": "Buy", "source": "Fund"},
+    {"ticker": "HPG", "action": "Watch", "source": "Expert"},
+    {"ticker": "SSI", "action": "Watch", "source": "Broker"},
+    {"ticker": "MWG", "action": "Buy", "source": "Retail Research"},
+    {"ticker": "ACB", "action": "Buy", "source": "Research"},
+]
 
 RSS_FEEDS = {
     "VnExpress Kinh doanh": "https://vnexpress.net/rss/kinh-doanh.rss",
@@ -109,7 +124,7 @@ SCHEDULER_STARTED = False
 
 
 # =========================================================
-# HELPERS
+# FILE / JSON / LOG
 # =========================================================
 def init_csv(path: Path, columns: List[str]) -> None:
     if not path.exists():
@@ -131,6 +146,12 @@ def load_json(path: Path, default=None):
         return default
 
 
+def append_csv_row(path: Path, row: dict) -> None:
+    df = pd.read_csv(path) if path.exists() else pd.DataFrame()
+    df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+    df.to_csv(path, index=False, encoding="utf-8-sig")
+
+
 def normalize_text(text: str) -> str:
     text = text or ""
     text = text.replace("\r\n", "\n").replace("\r", "\n")
@@ -142,6 +163,92 @@ def hash_text(text: str) -> str:
     return hashlib.md5(text.encode("utf-8")).hexdigest()
 
 
+def log_audit(username: str, action: str, detail: str = "") -> None:
+    append_csv_row(AUDIT_LOG_FILE, {
+        "Time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "Username": username,
+        "Action": action,
+        "Detail": detail,
+    })
+
+
+def ensure_files() -> None:
+    if not CONFIG_FILE.exists():
+        save_json(CONFIG_FILE, {
+            "model": DEFAULT_MODEL,
+            "house_view": "Neutral",
+            "default_recipients": "",
+            "smart_mode": True,
+            "auto_send_after_run_all": False,
+            "trade_ideas_count": 8,
+            "auto_send_enabled": False,
+            "auto_send_time": "09:00",
+            "auto_send_groups": ["internal_morning"],
+            "auto_user_news": "",
+            "auto_expert_notes": ""
+        })
+
+    if not CACHE_FILE.exists():
+        save_json(CACHE_FILE, {})
+
+    if not USERS_FILE.exists():
+        save_json(USERS_FILE, [{
+            "username": "admin",
+            "password_hash": hash_password("admin123"),
+            "role": "admin",
+            "full_name": "System Admin",
+            "active": True
+        }])
+
+    if not RECIPIENT_GROUPS_FILE.exists():
+        save_json(RECIPIENT_GROUPS_FILE, {
+            "internal_morning": [],
+            "cio_team": [],
+            "pm_team": []
+        })
+
+    init_csv(EMAIL_LOG_FILE, ["SendTime", "Sender", "Recipients", "Subject", "Status", "Error"])
+    init_csv(AUDIT_LOG_FILE, ["Time", "Username", "Action", "Detail"])
+    init_csv(MARKET_HISTORY_FILE, ["Date", "MorningNote", "ClosingNote"])
+    init_csv(IC_HISTORY_FILE, ["Date", "ICNote"])
+    init_csv(TRADE_IDEAS_HISTORY_FILE, ["Date", "TradeIdeas"])
+
+
+def load_config() -> dict:
+    return load_json(CONFIG_FILE, {})
+
+
+def save_config(cfg: dict) -> None:
+    save_json(CONFIG_FILE, cfg)
+
+
+def load_cache() -> dict:
+    return load_json(CACHE_FILE, {})
+
+
+def save_cache(cache: dict) -> None:
+    save_json(CACHE_FILE, cache)
+
+
+def load_users() -> List[dict]:
+    return load_json(USERS_FILE, [])
+
+
+def save_users(users: List[dict]) -> None:
+    save_json(USERS_FILE, users)
+
+
+def load_recipient_groups() -> dict:
+    return load_json(RECIPIENT_GROUPS_FILE, {})
+
+
+def save_recipient_groups(groups: dict) -> None:
+    save_json(RECIPIENT_GROUPS_FILE, groups)
+
+
+# =========================================================
+# SECRETS / AUTH
+# =========================================================
 def get_secret(name: str, default: str = "") -> str:
     try:
         return str(st.secrets.get(name, default))
@@ -154,89 +261,6 @@ def get_runtime_value(config_value: str, secret_name: str) -> str:
     return secret_val if secret_val else (config_value or "")
 
 
-def ai_is_available(api_key: str) -> bool:
-    return bool(api_key) and (OpenAI is not None)
-
-
-def load_cache() -> dict:
-    return load_json(CACHE_FILE, {})
-
-
-def save_cache(cache: dict) -> None:
-    save_json(CACHE_FILE, cache)
-
-
-def append_csv_row(path: Path, row: dict) -> None:
-    df = pd.read_csv(path) if path.exists() else pd.DataFrame()
-    df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
-    df.to_csv(path, index=False, encoding="utf-8-sig")
-
-
-def ensure_files() -> None:
-    if not CONFIG_FILE.exists():
-        save_json(CONFIG_FILE, {
-            "model": DEFAULT_MODEL,
-            "house_view": "Neutral",
-            "default_recipients": "",
-            "smart_mode": True,
-            "auto_send_after_run_all": False,
-            "trade_ideas_count": 7,
-            "auto_send_enabled": False,
-            "auto_send_time": "09:00",
-            "auto_send_groups": ["internal_morning"],
-            "auto_user_news": "",
-            "auto_expert_notes": ""
-        })
-
-    if not CACHE_FILE.exists():
-        save_json(CACHE_FILE, {})
-
-    if not USERS_FILE.exists():
-        default_password_hash = hash_password("admin123")
-        save_json(USERS_FILE, [
-            {
-                "username": "admin",
-                "password_hash": default_password_hash,
-                "role": "admin",
-                "full_name": "System Admin",
-                "active": True
-            }
-        ])
-
-    if not RECIPIENT_GROUPS_FILE.exists():
-        save_json(RECIPIENT_GROUPS_FILE, {
-            "internal_morning": [],
-            "cio_team": [],
-            "pm_team": []
-        })
-
-    init_csv(EMAIL_LOG_FILE, ["SendTime", "Sender", "Recipients", "Subject", "Status", "Error"])
-    init_csv(MARKET_HISTORY_FILE, ["Date", "MorningNote", "ClosingNote"])
-    init_csv(IC_HISTORY_FILE, ["Date", "ICNote"])
-    init_csv(TRADE_IDEAS_HISTORY_FILE, ["Date", "TradeIdeas"])
-    init_csv(AUDIT_LOG_FILE, ["Time", "Username", "Action", "Detail"])
-
-
-def load_config() -> dict:
-    return load_json(CONFIG_FILE, {})
-
-
-def save_config(cfg: dict) -> None:
-    save_json(CONFIG_FILE, cfg)
-
-
-def log_audit(username: str, action: str, detail: str = "") -> None:
-    append_csv_row(AUDIT_LOG_FILE, {
-        "Time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "Username": username,
-        "Action": action,
-        "Detail": detail,
-    })
-
-
-# =========================================================
-# AUTH
-# =========================================================
 def hash_password(password: str) -> str:
     if bcrypt is not None:
         return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
@@ -254,15 +278,7 @@ def verify_password(password: str, stored_hash: str) -> bool:
     return hashlib.sha256(password.encode("utf-8")).hexdigest() == stored_hash
 
 
-def load_users() -> List[dict]:
-    return load_json(USERS_FILE, [])
-
-
-def save_users(users: List[dict]) -> None:
-    save_json(USERS_FILE, users)
-
-
-def authenticate(username: str, password: str) -> dict | None:
+def authenticate(username: str, password: str) -> Optional[dict]:
     for user in load_users():
         if user.get("username") == username and user.get("active", True):
             if verify_password(password, user.get("password_hash", "")):
@@ -278,17 +294,6 @@ def has_permission(permission: str) -> bool:
     return permission in ROLE_PERMISSIONS.get(role, set())
 
 
-# =========================================================
-# GROUPS
-# =========================================================
-def load_recipient_groups() -> dict:
-    return load_json(RECIPIENT_GROUPS_FILE, {})
-
-
-def save_recipient_groups(groups: dict) -> None:
-    save_json(RECIPIENT_GROUPS_FILE, groups)
-
-
 def get_emails_from_groups(group_names: List[str]) -> List[str]:
     groups = load_recipient_groups()
     emails: List[str] = []
@@ -300,6 +305,10 @@ def get_emails_from_groups(group_names: List[str]) -> List[str]:
 # =========================================================
 # AI
 # =========================================================
+def ai_is_available(api_key: str) -> bool:
+    return bool(api_key) and (OpenAI is not None)
+
+
 def generate_with_openai(api_key: str, model: str, system_prompt: str, user_prompt: str, max_output_tokens: int = 1800) -> str:
     client = OpenAI(api_key=api_key)
     response = client.responses.create(
@@ -350,6 +359,16 @@ def fetch_market_snapshot(tickers: Dict[str, str]) -> pd.DataFrame:
         except Exception:
             continue
     return pd.DataFrame(rows)
+
+
+def fetch_last_price_for_ticker(ticker: str) -> Optional[float]:
+    try:
+        hist = yf.Ticker(ticker).history(period="5d", interval="1d", auto_adjust=False)
+        if hist.empty:
+            return None
+        return float(hist.iloc[-1]["Close"])
+    except Exception:
+        return None
 
 
 def fetch_vn_recommendation_watchlist() -> pd.DataFrame:
@@ -407,7 +426,7 @@ def classify_asset_class(text: str) -> str:
 def estimate_vn_impact(text: str) -> int:
     t = (text or "").lower()
     score = 1
-    for k in ["vnindex", "vietnam", "sbv", "usd", "oil", "bank", "fpt", "vcb", "hpg"]:
+    for k in ["vnindex", "vietnam", "sbv", "usd", "oil", "bank", "fpt", "vcb", "hpg", "mbb"]:
         if k in t:
             score += 1
     return min(score, 5)
@@ -504,9 +523,56 @@ def get_market_bias(market_df: pd.DataFrame) -> str:
     return "Neutral"
 
 
+def _get_change(market_df: pd.DataFrame, asset_name: str) -> float:
+    row = market_df.loc[market_df["Asset"] == asset_name]
+    if row.empty or pd.isna(row.iloc[0]["ChangePct"]):
+        return 0.0
+    return float(row.iloc[0]["ChangePct"])
+
+
 # =========================================================
-# EXPERT / ALLOCATION / IDEAS
+# EXPERT CONSENSUS
 # =========================================================
+def summarize_vn_expert_recommendations(recs: List[dict]) -> pd.DataFrame:
+    if not recs:
+        return pd.DataFrame(columns=["Ticker", "Mentions", "Buy", "Watch", "Sell", "Consensus", "Sources"])
+    df = pd.DataFrame(recs)
+    rows = []
+    for ticker, grp in df.groupby("ticker"):
+        buy = int((grp["action"].str.lower() == "buy").sum())
+        watch = int((grp["action"].str.lower() == "watch").sum())
+        sell = int((grp["action"].str.lower().isin(["sell", "reduce", "underweight"])).sum())
+        mentions = len(grp)
+        sources = ", ".join(sorted(grp["source"].dropna().astype(str).unique().tolist()))
+        if buy >= max(watch, sell):
+            consensus = "Buy / Mua"
+        elif sell > max(buy, watch):
+            consensus = "Reduce / Giảm tỷ trọng"
+        else:
+            consensus = "Watch / Theo dõi"
+        rows.append({
+            "Ticker": ticker,
+            "Mentions": mentions,
+            "Buy": buy,
+            "Watch": watch,
+            "Sell": sell,
+            "Consensus": consensus,
+            "Sources": sources
+        })
+    return pd.DataFrame(rows).sort_values(by=["Mentions", "Buy", "Watch"], ascending=[False, False, False]).reset_index(drop=True)
+
+
+def build_vn_consensus_text(df: pd.DataFrame) -> str:
+    if df.empty:
+        return "No VN expert consensus."
+    lines = ["VIETNAM STOCK CONSENSUS / CỔ PHIẾU ĐƯỢC ĐỀ XUẤT"]
+    for _, r in df.head(8).iterrows():
+        lines.append(
+            f"- {r['Ticker']}: {r['Consensus']} | Mentions={r['Mentions']} | Buy={r['Buy']} | Sources={r['Sources']}"
+        )
+    return "\n".join(lines)
+
+
 def build_expert_fund_summary(user_expert_notes: str = "") -> str:
     base = """
 - SSI: Ưu tiên large caps và câu chuyện nâng hạng / Focus on large caps and the upgrade story.
@@ -518,95 +584,396 @@ def build_expert_fund_summary(user_expert_notes: str = "") -> str:
     return base
 
 
-def _get_change(market_df: pd.DataFrame, asset_name: str) -> float:
-    row = market_df.loc[market_df["Asset"] == asset_name]
-    if row.empty or pd.isna(row.iloc[0]["ChangePct"]):
-        return 0.0
-    return float(row.iloc[0]["ChangePct"])
-
-
-def compute_portfolio_allocation(market_df: pd.DataFrame, news_df: pd.DataFrame) -> dict:
-    allocation = {
-        "Equity": {"Global": "Neutral", "Vietnam": "Neutral"},
-        "FixedIncome": {"Global": "Neutral", "Vietnam": "Neutral"},
-        "Commodity": {"Oil": "Neutral", "Gold": "Neutral"},
-        "FX": {"USD": "Neutral"},
-        "Regime": "Neutral / Transition"
-    }
-    if market_df.empty:
-        return allocation
-
+# =========================================================
+# ALLOCATION V6.4
+# =========================================================
+def compute_portfolio_allocation_v64(
+    market_df: pd.DataFrame,
+    news_df: pd.DataFrame,
+    consensus_df: Optional[pd.DataFrame] = None
+) -> dict:
     oil_chg = _get_change(market_df, "Oil (WTI)")
     gold_chg = _get_change(market_df, "Gold")
     usd_chg = _get_change(market_df, "USD Index")
     vn_chg = _get_change(market_df, "VNINDEX")
     spx_chg = _get_change(market_df, "S&P 500")
+    ndx_chg = _get_change(market_df, "Nasdaq")
     us10y_chg = _get_change(market_df, "US 10Y Yield")
+    usdvnd_chg = _get_change(market_df, "USD/VND (proxy)")
 
-    score = 0
-    if oil_chg > 1:
-        allocation["Commodity"]["Oil"] = "Overweight"
-        allocation["FixedIncome"]["Global"] = "Underweight"
-        score -= 1
-    if gold_chg > 0.5:
-        allocation["Commodity"]["Gold"] = "Overweight"
-    if usd_chg > 0.5:
-        allocation["FX"]["USD"] = "Long"
-        allocation["Equity"]["Global"] = "Underweight"
-        score -= 1
-    if us10y_chg > 0.5:
-        allocation["FixedIncome"]["Global"] = "Underweight"
-    elif us10y_chg < -0.3:
-        allocation["FixedIncome"]["Global"] = "Overweight"
-    if vn_chg > 1:
-        allocation["Equity"]["Vietnam"] = "Overweight"
-        score += 1
-    elif vn_chg < -1:
-        allocation["Equity"]["Vietnam"] = "Underweight"
+    regime_score = 0
     if spx_chg > 0.5:
-        allocation["Equity"]["Global"] = "Overweight"
-        score += 1
-    elif spx_chg < -0.8:
-        allocation["Equity"]["Global"] = "Underweight"
+        regime_score += 1
+    if ndx_chg > 0.5:
+        regime_score += 1
+    if vn_chg > 0.7:
+        regime_score += 1
+    if usd_chg > 0.5:
+        regime_score -= 1
+    if oil_chg > 1.5:
+        regime_score -= 1
+    if us10y_chg > 0.5:
+        regime_score -= 1
 
-    if score >= 1 and usd_chg <= 0.5:
-        allocation["Regime"] = "Risk-on"
-    elif score <= -1 or usd_chg > 0.5 or oil_chg > 1.5:
-        allocation["Regime"] = "Risk-off"
+    if regime_score >= 2:
+        regime = "Risk-on"
+    elif regime_score <= -1:
+        regime = "Risk-off"
+    else:
+        regime = "Transition"
+
+    vn_consensus_strength = 0
+    vn_top_tickers: List[str] = []
+    if consensus_df is not None and not consensus_df.empty:
+        if "Buy" in consensus_df.columns and int(consensus_df["Buy"].sum()) >= 5:
+            vn_consensus_strength = 1
+        if "Ticker" in consensus_df.columns:
+            vn_top_tickers = consensus_df.head(5)["Ticker"].astype(str).tolist()
+
+    allocation = {
+        "Regime": regime,
+        "Global Equity": {
+            "View": "Neutral",
+            "Conviction": "Medium",
+            "Horizon": "1-3 months",
+            "Rationale": "",
+            "Risk": "",
+            "Trigger": "",
+            "PortfolioFit": "Core risk asset",
+        },
+        "Vietnam Equity": {
+            "View": "Neutral",
+            "Conviction": "Medium",
+            "Horizon": "1-3 months",
+            "Rationale": "",
+            "Risk": "",
+            "Trigger": "",
+            "PortfolioFit": "Core + tactical alpha",
+        },
+        "Global Fixed Income": {
+            "View": "Neutral",
+            "Conviction": "Medium",
+            "Horizon": "2-6 weeks",
+            "Rationale": "",
+            "Risk": "",
+            "Trigger": "",
+            "PortfolioFit": "Hedge / duration stabilizer",
+        },
+        "Vietnam Fixed Income": {
+            "View": "Neutral",
+            "Conviction": "Medium",
+            "Horizon": "1-3 months",
+            "Rationale": "",
+            "Risk": "",
+            "Trigger": "",
+            "PortfolioFit": "Liquidity anchor",
+        },
+        "Oil": {
+            "View": "Neutral",
+            "Conviction": "Medium",
+            "Horizon": "2-6 weeks",
+            "Rationale": "",
+            "Risk": "",
+            "Trigger": "",
+            "PortfolioFit": "Inflation hedge",
+        },
+        "Gold": {
+            "View": "Neutral",
+            "Conviction": "Medium",
+            "Horizon": "2-6 weeks",
+            "Rationale": "",
+            "Risk": "",
+            "Trigger": "",
+            "PortfolioFit": "Defensive hedge",
+        },
+        "USD": {
+            "View": "Neutral",
+            "Conviction": "Medium",
+            "Horizon": "2-6 weeks",
+            "Rationale": "",
+            "Risk": "",
+            "Trigger": "",
+            "PortfolioFit": "Macro hedge",
+        },
+    }
+
+    if spx_chg > 0.5 and ndx_chg > 0 and us10y_chg <= 0.3 and usd_chg <= 0.5:
+        allocation["Global Equity"]["View"] = "Overweight"
+        allocation["Global Equity"]["Rationale"] = (
+            "Động lượng cổ phiếu toàn cầu vẫn tích cực trong khi lợi suất và USD chưa siết quá mạnh. "
+            "Global equity momentum remains constructive while yields and USD are not tightening aggressively."
+        )
+        allocation["Global Equity"]["Risk"] = (
+            "Rủi ro chính là lợi suất tăng lại hoặc USD mạnh lên. "
+            "Main risk is a renewed yield spike or stronger USD."
+        )
+        allocation["Global Equity"]["Trigger"] = (
+            "Tăng thêm khi S&P 500 và Nasdaq giữ xu hướng tăng với lợi suất ổn định. "
+            "Add if S&P 500 and Nasdaq maintain positive momentum with stable yields."
+        )
+    elif usd_chg > 0.5 or us10y_chg > 0.5:
+        allocation["Global Equity"]["View"] = "Underweight"
+        allocation["Global Equity"]["Rationale"] = (
+            "USD mạnh và lợi suất cao gây áp lực lên định giá và khẩu vị rủi ro. "
+            "Stronger USD and higher yields pressure valuation and risk appetite."
+        )
+        allocation["Global Equity"]["Risk"] = (
+            "Có thể bỏ lỡ nhịp hồi nếu macro stress dịu nhanh. "
+            "Could miss a rebound if macro stress fades quickly."
+        )
+        allocation["Global Equity"]["Trigger"] = (
+            "Nâng lại khi lợi suất ổn định và USD hạ nhiệt. "
+            "Re-upgrade when yields stabilize and USD cools."
+        )
+
+    if vn_chg > 0.7:
+        allocation["Vietnam Equity"]["View"] = "Overweight"
+        allocation["Vietnam Equity"]["Conviction"] = "High" if vn_consensus_strength == 1 else "Medium"
+        allocation["Vietnam Equity"]["Rationale"] = (
+            f"Động lượng nội địa tích cực, và đồng thuận chuyên gia hỗ trợ thêm cho các mã như {', '.join(vn_top_tickers) if vn_top_tickers else 'large caps'}. "
+            f"Domestic momentum is constructive, and expert consensus adds support for names such as {', '.join(vn_top_tickers) if vn_top_tickers else 'large caps'}."
+        )
+        allocation["Vietnam Equity"]["Risk"] = (
+            "Rủi ro là áp lực tỷ giá, khối ngoại bán ròng hoặc nhóm dẫn dắt suy yếu. "
+            "Risks are FX pressure, foreign outflows, or leadership breakdown."
+        )
+        allocation["Vietnam Equity"]["Trigger"] = (
+            "Tăng thêm khi VNIndex và large caps tiếp tục dẫn dắt, USD/VND ổn định. "
+            "Add if VNIndex and large caps continue to lead with stable USD/VND."
+        )
+    elif usdvnd_chg > 0.7:
+        allocation["Vietnam Equity"]["Rationale"] = (
+            "Áp lực tỷ giá hạn chế appetite ngắn hạn dù nền tảng nội địa vẫn đỡ. "
+            "FX stress limits near-term risk appetite despite domestic support."
+        )
+        allocation["Vietnam Equity"]["Risk"] = (
+            "USD/VND tăng tiếp sẽ gây áp lực thêm lên equity Việt Nam. "
+            "Further USD/VND upside would add pressure on Vietnam equities."
+        )
+        allocation["Vietnam Equity"]["Trigger"] = (
+            "Nâng lại khi USD/VND ổn định và dòng tiền quay lại large caps. "
+            "Upgrade if USD/VND stabilizes and flows return to large caps."
+        )
+    else:
+        allocation["Vietnam Equity"]["Rationale"] = (
+            "Thị trường Việt Nam cần thêm xác nhận từ dòng tiền, tỷ giá và nhóm dẫn dắt. "
+            "Vietnam equities need further confirmation from flows, FX, and leadership."
+        )
+        allocation["Vietnam Equity"]["Risk"] = (
+            "Foreign outflows và FX pressure. "
+            "Foreign outflows and FX pressure."
+        )
+        allocation["Vietnam Equity"]["Trigger"] = (
+            "Nâng lên khi VNIndex bứt phá với thanh khoản cải thiện. "
+            "Upgrade on a VNIndex breakout with improving liquidity."
+        )
+
+    if us10y_chg > 0.5 or oil_chg > 1.5:
+        allocation["Global Fixed Income"]["View"] = "Underweight"
+        allocation["Global Fixed Income"]["Rationale"] = (
+            "Lợi suất tăng và rủi ro lạm phát từ dầu khiến duration kém hấp dẫn ngắn hạn. "
+            "Rising yields and oil-driven inflation risk argue against adding duration near term."
+        )
+        allocation["Global Fixed Income"]["Risk"] = (
+            "Rủi ro là growth scare bất ngờ khiến duration bật tăng mạnh. "
+            "Risk is a sudden growth scare that triggers a duration rally."
+        )
+        allocation["Global Fixed Income"]["Trigger"] = (
+            "Nâng lên khi lợi suất và dầu ổn định hơn. "
+            "Upgrade when yields and oil stabilize."
+        )
+    elif us10y_chg < -0.3:
+        allocation["Global Fixed Income"]["View"] = "Overweight"
+        allocation["Global Fixed Income"]["Rationale"] = (
+            "Lợi suất hạ tạo điều kiện thuận lợi hơn cho duration. "
+            "Falling yields improve the setup for duration."
+        )
+        allocation["Global Fixed Income"]["Risk"] = (
+            "Lạm phát quay lại sẽ làm view duration yếu đi. "
+            "Re-accelerating inflation would weaken the duration view."
+        )
+        allocation["Global Fixed Income"]["Trigger"] = (
+            "Tăng thêm khi yields tiếp tục giảm. "
+            "Add if yields continue to ease."
+        )
+    else:
+        allocation["Global Fixed Income"]["Rationale"] = (
+            "Chưa đủ tín hiệu để tăng duration mạnh. "
+            "There is not enough evidence yet to aggressively add duration."
+        )
+        allocation["Global Fixed Income"]["Risk"] = (
+            "Inflation shock hoặc yield spike. "
+            "Inflation shock or yield spike."
+        )
+        allocation["Global Fixed Income"]["Trigger"] = (
+            "Nâng lên khi inflation risk dịu xuống. "
+            "Upgrade when inflation risk fades."
+        )
+
+    allocation["Vietnam Fixed Income"]["Rationale"] = (
+        "Theo dõi thanh khoản nội địa, tỷ giá và định hướng điều hành để đánh giá cơ hội duration trong nước. "
+        "Monitor domestic liquidity, FX and policy direction to assess local duration opportunities."
+    )
+    allocation["Vietnam Fixed Income"]["Risk"] = (
+        "Áp lực tỷ giá bất ngờ hoặc thanh khoản thắt lại. "
+        "Unexpected FX pressure or tighter liquidity."
+    )
+    allocation["Vietnam Fixed Income"]["Trigger"] = (
+        "Nâng lên khi FX ổn định và thanh khoản cải thiện. "
+        "Upgrade when FX stabilizes and liquidity improves."
+    )
+
+    if oil_chg > 1:
+        allocation["Oil"]["View"] = "Overweight"
+        allocation["Oil"]["Rationale"] = (
+            "Động lượng giá dầu tích cực và vai trò hedge lạm phát hỗ trợ vị thế chiến thuật. "
+            "Positive oil momentum and its inflation-hedge role support tactical exposure."
+        )
+        allocation["Oil"]["Risk"] = (
+            "Giá đảo chiều nhanh nếu căng thẳng hoặc demand concerns dịu đi. "
+            "Sharp reversal if geopolitical or demand concerns ease."
+        )
+        allocation["Oil"]["Trigger"] = (
+            "Giảm tỷ trọng nếu oil momentum suy yếu. "
+            "Reduce if oil momentum fades."
+        )
+    else:
+        allocation["Oil"]["Rationale"] = (
+            "Dầu nên được xem là tactical hedge hơn là core holding. "
+            "Oil should be treated as a tactical hedge rather than a core holding."
+        )
+        allocation["Oil"]["Risk"] = (
+            "Biến động mạnh do tin tức. "
+            "Headline-driven volatility."
+        )
+        allocation["Oil"]["Trigger"] = (
+            "Tăng khi oil break-out rõ hơn. "
+            "Add on a clearer upside breakout."
+        )
+
+    if gold_chg > 0.5 or regime == "Risk-off":
+        allocation["Gold"]["View"] = "Overweight"
+        allocation["Gold"]["Rationale"] = (
+            "Vàng phù hợp như lớp phòng thủ khi thị trường multi-asset biến động mạnh. "
+            "Gold fits as a defensive layer in volatile multi-asset conditions."
+        )
+        allocation["Gold"]["Risk"] = (
+            "Real yields tăng nhanh có thể gây áp lực lên vàng. "
+            "Rapidly rising real yields could pressure gold."
+        )
+        allocation["Gold"]["Trigger"] = (
+            "Tăng thêm nếu risk-off kéo dài. "
+            "Add if the risk-off regime persists."
+        )
+    else:
+        allocation["Gold"]["Rationale"] = (
+            "Vàng phù hợp để hedge danh mục khi uncertainty tăng lên. "
+            "Gold is useful as a portfolio hedge when uncertainty rises."
+        )
+        allocation["Gold"]["Risk"] = (
+            "Risk-on mạnh làm nhu cầu hedge giảm. "
+            "A strong risk-on rebound may reduce hedge demand."
+        )
+        allocation["Gold"]["Trigger"] = (
+            "Nâng lên khi USD và volatility cùng tăng. "
+            "Upgrade when both USD and volatility rise."
+        )
+
+    if usd_chg > 0.5:
+        allocation["USD"]["View"] = "Long"
+        allocation["USD"]["Rationale"] = (
+            "USD mạnh hỗ trợ vai trò hedge trong môi trường biến động. "
+            "USD strength supports its role as a hedge in volatile conditions."
+        )
+        allocation["USD"]["Risk"] = (
+            "Risk sentiment hồi phục nhanh có thể đảo chiều USD. "
+            "A quick rebound in risk sentiment may reverse USD strength."
+        )
+        allocation["USD"]["Trigger"] = (
+            "Duy trì khi DXY còn xu hướng tăng. "
+            "Maintain while DXY trend remains firm."
+        )
+    else:
+        allocation["USD"]["Rationale"] = (
+            "USD nên được giữ trung lập nếu chưa có tín hiệu risk-off rõ. "
+            "USD should remain neutral without a clear risk-off signal."
+        )
+        allocation["USD"]["Risk"] = (
+            "Policy surprise hoặc sudden risk-off. "
+            "Policy surprise or sudden risk-off."
+        )
+        allocation["USD"]["Trigger"] = (
+            "Chuyển sang long khi DXY tăng rõ hơn. "
+            "Shift to long if DXY strengthens more clearly."
+        )
 
     return allocation
 
 
-def format_allocation(allocation: dict) -> str:
-    lines = [f"PORTFOLIO ALLOCATION / PHÂN BỔ DANH MỤC",
-             f"- Market Regime / Chế độ thị trường: {allocation.get('Regime', 'Neutral')}"]
-    lines.append("")
-    lines.append("EQUITY:")
-    for k, v in allocation.get("Equity", {}).items():
-        lines.append(f"- {k}: {v}")
-    lines.append("")
-    lines.append("FIXED INCOME:")
-    for k, v in allocation.get("FixedIncome", {}).items():
-        lines.append(f"- {k}: {v}")
-    lines.append("")
-    lines.append("COMMODITY:")
-    for k, v in allocation.get("Commodity", {}).items():
-        lines.append(f"- {k}: {v}")
-    lines.append("")
-    lines.append("FX:")
-    for k, v in allocation.get("FX", {}).items():
-        lines.append(f"- {k}: {v}")
+def format_allocation_v64(allocation: dict) -> str:
+    lines = [
+        "PORTFOLIO ALLOCATION / PHÂN BỔ DANH MỤC",
+        f"- Market Regime / Chế độ thị trường: {allocation.get('Regime', 'Transition')}"
+    ]
+    for key, value in allocation.items():
+        if key == "Regime":
+            continue
+        lines.append("")
+        lines.append(f"{key}:")
+        lines.append(f"- View: {value.get('View', 'Neutral')}")
+        lines.append(f"- Conviction: {value.get('Conviction', 'Medium')}")
+        lines.append(f"- Horizon: {value.get('Horizon', '1-3 months')}")
+        lines.append(f"- Rationale: {value.get('Rationale', '')}")
+        lines.append(f"- Risk: {value.get('Risk', '')}")
+        lines.append(f"- Trigger: {value.get('Trigger', '')}")
+        lines.append(f"- Portfolio Fit: {value.get('PortfolioFit', '')}")
     return "\n".join(lines)
 
 
-def score_trade_idea(asset: str, market_df: pd.DataFrame, news_df: pd.DataFrame) -> dict:
+# =========================================================
+# TRADE IDEAS V6.4
+# =========================================================
+def estimate_target_zone(asset: str, market_df: pd.DataFrame) -> str:
+    asset_upper = asset.upper()
+    if asset_upper in ["VNINDEX", "USD", "OIL", "GOLD", "GLOBAL EQUITY", "VIETNAM BANKS"]:
+        if asset_upper == "VNINDEX":
+            price = _get_change(market_df, "VNINDEX")
+            return f"Target zone giả lập: +3% đến +8% từ mức hiện tại"
+        if asset_upper == "USD":
+            return "Target zone giả lập: +1% đến +3% nếu DXY duy trì xu hướng"
+        if asset_upper == "OIL":
+            return "Target zone giả lập: +3% đến +7% nếu dầu duy trì breakout"
+        if asset_upper == "GOLD":
+            return "Target zone giả lập: +2% đến +5% trong kịch bản defensive"
+        if asset_upper == "GLOBAL EQUITY":
+            return "Target zone giả lập: +4% đến +8% trong 1-3 tháng"
+        if asset_upper == "VIETNAM BANKS":
+            return "Target zone giả lập: +5% đến +10% nếu nhóm dẫn dắt xác nhận"
+    if asset_upper.endswith(".VN"):
+        last_price = fetch_last_price_for_ticker(asset_upper)
+        if last_price:
+            low = round(last_price * 1.05, 2)
+            high = round(last_price * 1.12, 2)
+            return f"Target price giả lập: {low} - {high}"
+    bare = asset_upper.replace(".VN", "")
+    last_price = fetch_last_price_for_ticker(f"{bare}.VN")
+    if last_price:
+        low = round(last_price * 1.05, 2)
+        high = round(last_price * 1.12, 2)
+        return f"Target price giả lập: {low} - {high}"
+    return "Target zone giả lập: TBD"
+
+
+def score_trade_idea_base(asset: str, market_df: pd.DataFrame, news_df: pd.DataFrame) -> dict:
     score = 5.0
     rationale = []
+
     oil_chg = _get_change(market_df, "Oil (WTI)")
     gold_chg = _get_change(market_df, "Gold")
     usd_chg = _get_change(market_df, "USD Index")
     vn_chg = _get_change(market_df, "VNINDEX")
     spx_chg = _get_change(market_df, "S&P 500")
+
     a = asset.lower()
 
     if "oil" in a and oil_chg > 1:
@@ -614,15 +981,19 @@ def score_trade_idea(asset: str, market_df: pd.DataFrame, news_df: pd.DataFrame)
         rationale.append("Oil momentum positive")
     if "gold" in a and (gold_chg > 0.5 or usd_chg > 0.4):
         score += 1
-        rationale.append("Defensive demand")
+        rationale.append("Defensive demand supports gold")
     if "usd" in a and usd_chg > 0.5:
         score += 2
         rationale.append("USD strength confirmed")
     if ("vnindex" in a or ".vn" in a or "vietnam" in a) and vn_chg > 0.7:
         score += 1.5
-        rationale.append("Vietnam momentum supportive")
+        rationale.append("Vietnam equity momentum supportive")
     if "global equity" in a and spx_chg > 0.5:
         score += 1.5
+        rationale.append("Global equity momentum supportive")
+    if "bank" in a and vn_chg > 0:
+        score += 1
+        rationale.append("Domestic leadership supportive")
 
     if not news_df.empty:
         matches = news_df[
@@ -630,11 +1001,14 @@ def score_trade_idea(asset: str, market_df: pd.DataFrame, news_df: pd.DataFrame)
             news_df["Summary"].str.contains(asset.split()[0], case=False, na=False)
         ]
         score += min(len(matches) * 0.5, 2.0)
+        if len(matches) > 0:
+            rationale.append(f"News flow support: {len(matches)} items")
 
     score = max(1.0, min(score, 10.0))
     confidence = "High" if score >= 8 else "Medium" if score >= 6 else "Low"
-    direction = "Overweight / Tăng tỷ trọng" if score >= 8 else "Positive Watch / Theo dõi tích cực" if score >= 6.5 else "Watch"
+    direction = "Overweight / Tăng tỷ trọng" if score >= 8 else "Positive Watch / Theo dõi tích cực" if score >= 6.5 else "Watch / Theo dõi"
     horizon = "1-4 weeks" if score >= 7 else "Short-term watch"
+
     return {
         "Asset": asset,
         "Score": round(score, 1),
@@ -645,25 +1019,95 @@ def score_trade_idea(asset: str, market_df: pd.DataFrame, news_df: pd.DataFrame)
     }
 
 
-def generate_ranked_trade_ideas(market_df: pd.DataFrame, news_df: pd.DataFrame, ideas_count: int = 7) -> pd.DataFrame:
-    universe = ["Oil", "Gold", "USD", "VNINDEX", "Vietnam Banks", "FPT.VN", "HPG.VN", "VCB.VN", "SSI.VN", "Global Equity"]
-    scored = [score_trade_idea(asset, market_df, news_df) for asset in universe]
-    df = pd.DataFrame(scored).sort_values(by="Score", ascending=False).head(ideas_count).reset_index(drop=True)
+def score_trade_idea_v64(asset: str, market_df: pd.DataFrame, news_df: pd.DataFrame, consensus_df: Optional[pd.DataFrame] = None) -> dict:
+    base = score_trade_idea_base(asset, market_df, news_df)
+    portfolio_fit = "Tactical"
+    why_now = "Cross-asset setup is supportive."
+    conviction = base["Confidence"]
+
+    if asset.upper() in ["USD", "GOLD"]:
+        portfolio_fit = "Hedge"
+        why_now = "Useful hedge under volatile macro conditions."
+    elif asset.upper() in ["VNINDEX", "GLOBAL EQUITY", "VIETNAM BANKS"]:
+        portfolio_fit = "Core + tactical"
+        why_now = "Momentum and flow can improve overall portfolio beta."
+    elif asset.upper().endswith(".VN"):
+        portfolio_fit = "Alpha / Vietnam stock selection"
+        why_now = "Single-stock selection can add alpha if leadership persists."
+
+    ticker_plain = asset.replace(".VN", "").upper()
+    if consensus_df is not None and not consensus_df.empty and "Ticker" in consensus_df.columns:
+        matched = consensus_df[consensus_df["Ticker"].str.upper() == ticker_plain]
+        if not matched.empty:
+            mentions = int(matched.iloc[0]["Mentions"])
+            buys = int(matched.iloc[0]["Buy"])
+            if mentions >= 2:
+                why_now = f"Repeated expert mentions ({mentions}) improve conviction."
+                portfolio_fit = "Alpha / expert consensus"
+                if float(base["Score"]) >= 7 or buys >= 2:
+                    conviction = "High"
+                    base["Score"] = min(10.0, float(base["Score"]) + 0.5)
+
+    target_zone = estimate_target_zone(asset, market_df)
+
+    if float(base["Score"]) >= 8:
+        direction = "Buy / Mua"
+    elif float(base["Score"]) >= 6.5:
+        direction = "Accumulate / Tích lũy"
+    elif float(base["Score"]) <= 4.5:
+        direction = "Reduce / Giảm tỷ trọng"
+    else:
+        direction = "Watch / Theo dõi"
+
+    base["Direction"] = direction
+    base["Conviction"] = conviction
+    base["WhyNow"] = why_now
+    base["PortfolioFit"] = portfolio_fit
+    base["TargetZone"] = target_zone
+    return base
+
+
+def generate_ranked_trade_ideas_v64(
+    market_df: pd.DataFrame,
+    news_df: pd.DataFrame,
+    ideas_count: int = 8,
+    consensus_df: Optional[pd.DataFrame] = None
+) -> pd.DataFrame:
+    universe = [
+        "Oil",
+        "Gold",
+        "USD",
+        "VNINDEX",
+        "Vietnam Banks",
+        "FPT.VN",
+        "HPG.VN",
+        "VCB.VN",
+        "MBB.VN",
+        "SSI.VN",
+        "MWG.VN",
+        "Global Equity"
+    ]
+    scored = [score_trade_idea_v64(asset, market_df, news_df, consensus_df) for asset in universe]
+    df = pd.DataFrame(scored).sort_values(by=["Score", "Conviction"], ascending=[False, True]).head(ideas_count).reset_index(drop=True)
     df.index = df.index + 1
     return df
 
 
-def format_trade_ideas_df(df: pd.DataFrame) -> str:
+def format_trade_ideas_v64(df: pd.DataFrame) -> str:
     if df.empty:
-        return "Chưa có trade idea / No trade ideas."
-    lines = ["TRADE IDEAS (RANKED) / Ý TƯỞNG ĐẦU TƯ"]
+        return "Chưa có trade ideas / No trade ideas."
+    lines = ["TRADE IDEAS V6.4 / Ý TƯỞNG ĐẦU TƯ V6.4"]
     for idx, row in df.iterrows():
         lines.append(
             f"\n#{idx} {row['Asset']}\n"
             f"- Direction: {row['Direction']}\n"
             f"- Score: {row['Score']}\n"
+            f"- Conviction: {row['Conviction']}\n"
             f"- Confidence: {row['Confidence']}\n"
             f"- Horizon: {row['Horizon']}\n"
+            f"- Why now: {row['WhyNow']}\n"
+            f"- Portfolio fit: {row['PortfolioFit']}\n"
+            f"- Target: {row['TargetZone']}\n"
             f"- Rationale: {row['Rationale']}"
         )
     return "\n".join(lines)
@@ -676,103 +1120,93 @@ def extract_top_idea(trade_ideas_text: str) -> str:
     blocks = [b.strip() for b in re.split(r"\n\s*\n", text) if b.strip()]
     if len(blocks) >= 2:
         return blocks[1]
-    return "\n".join(text.splitlines()[:8])
+    return "\n".join(text.splitlines()[:10])
 
 
 # =========================================================
-# NOTES
+# NOTE GENERATION
 # =========================================================
-def fallback_morning_note(note_date: str, bias: str, news_df: pd.DataFrame, expert_notes: str, allocation_text: str) -> str:
+def fallback_morning_note(note_date: str, bias: str, news_df: pd.DataFrame, expert_notes: str, allocation_text: str, consensus_text: str) -> str:
     return f"""MORNING NOTE / BẢN TIN SÁNG - {note_date}
 
 1. Global Fixed Income / Fixed Income toàn cầu
-- Theo dõi lợi suất và lạm phát.
-- Monitor yields and inflation.
+- Theo dõi lợi suất và lạm phát. / Monitor yields and inflation.
 
 2. Vietnam Fixed Income / Fixed Income Việt Nam
-- Theo dõi tỷ giá và thanh khoản.
-- Monitor FX and liquidity.
+- Theo dõi tỷ giá và thanh khoản. / Monitor FX and liquidity.
 
 3. Global Equity / Equity toàn cầu
-- Tâm lý phụ thuộc risk-on/risk-off.
-- Sentiment depends on risk-on/risk-off.
+- Tâm lý phụ thuộc risk-on/risk-off. / Sentiment depends on risk-on/risk-off.
 
 4. Vietnam Equity / Equity Việt Nam
-- Tập trung nhóm dẫn dắt và dòng tiền.
-- Focus on leadership groups and flows.
+- Tập trung nhóm dẫn dắt và dòng tiền. / Focus on leadership groups and flows.
 
 5. Commodity / FX
-- Dầu, vàng, USD là biến số lớn.
-- Oil, gold and USD are major variables.
+- Dầu, vàng, USD là biến số lớn. / Oil, gold and USD are major variables.
 
 6. Expert / Fund Recommendations Summary
 {build_expert_fund_summary(expert_notes)}
 
 7. Portfolio Positioning & CIO View
 - House view: {bias}
-- Ưu tiên allocation linh hoạt.
-- Keep allocation flexible.
+- Ưu tiên allocation linh hoạt. / Keep allocation flexible.
 
 {allocation_text}
 
-8. Key News
+8. Vietnam Expert Consensus
+{consensus_text}
+
+9. Key News
 {build_vn_global_news_brief(news_df, 4, 4)}
 """
 
 
-def fallback_closing_note(note_date: str, news_df: pd.DataFrame, expert_notes: str, allocation_text: str) -> str:
+def fallback_closing_note(note_date: str, news_df: pd.DataFrame, expert_notes: str, allocation_text: str, consensus_text: str) -> str:
     return f"""CLOSING NOTE / BẢN TIN CUỐI NGÀY - {note_date}
 
 1. Global Fixed Income / Fixed Income toàn cầu
-- Đánh giá lại lợi suất.
-- Reassess yields.
+- Đánh giá lại lợi suất. / Reassess yields.
 
 2. Vietnam Fixed Income / Fixed Income Việt Nam
-- Theo dõi tỷ giá và thanh khoản.
-- Monitor FX and liquidity.
+- Theo dõi tỷ giá và thanh khoản. / Monitor FX and liquidity.
 
 3. Global Equity / Equity toàn cầu
-- Kiểm tra risk sentiment.
-- Check risk sentiment.
+- Kiểm tra risk sentiment. / Check risk sentiment.
 
 4. Vietnam Equity / Equity Việt Nam
-- Kiểm tra độ rộng và thanh khoản.
-- Check breadth and liquidity.
+- Kiểm tra độ rộng và thanh khoản. / Check breadth and liquidity.
 
 5. Commodity / FX
-- Theo dõi dầu, vàng, USD.
-- Monitor oil, gold, USD.
+- Theo dõi dầu, vàng, USD. / Monitor oil, gold, USD.
 
 6. Expert / Fund Recommendations Summary
 {build_expert_fund_summary(expert_notes)}
 
 7. Changes vs Morning / Next Plan
 {allocation_text}
+
+8. Vietnam Expert Consensus
+{consensus_text}
 """
 
 
-def fallback_ic_note(note_date: str, news_df: pd.DataFrame, expert_notes: str, allocation_text: str) -> str:
+def fallback_ic_note(note_date: str, news_df: pd.DataFrame, expert_notes: str, allocation_text: str, consensus_text: str) -> str:
     return f"""IC NOTE / GHI CHÚ IC - {note_date}
 
 1. Global Fixed Income / Fixed Income toàn cầu
-- Duration trung lập.
-- Neutral duration.
+- Duration trung lập. / Neutral duration.
 
 2. Vietnam Fixed Income / Fixed Income Việt Nam
-- Theo dõi đường cong lợi suất.
-- Monitor local yield curve.
+- Theo dõi đường cong lợi suất. / Monitor local yield curve.
 
 3. Global Equity / Equity toàn cầu
-- Positioning linh hoạt.
-- Flexible positioning.
+- Positioning linh hoạt. / Flexible positioning.
 
 4. Vietnam Equity / Equity Việt Nam
-- Ưu tiên large caps nếu dòng tiền hỗ trợ.
-- Prefer large caps if flows support.
+- Ưu tiên large caps nếu dòng tiền hỗ trợ. / Prefer large caps if flows support.
 
 5. Commodity / FX
-- Theo dõi dầu, vàng, USD.
-- Monitor oil, gold, USD.
+- Theo dõi dầu, vàng, USD. / Monitor oil, gold, USD.
 
 6. Expert / Fund Recommendations Summary
 {build_expert_fund_summary(expert_notes)}
@@ -780,15 +1214,18 @@ def fallback_ic_note(note_date: str, news_df: pd.DataFrame, expert_notes: str, a
 7. Portfolio implication / Hàm ý danh mục
 {allocation_text}
 
-8. Key News
+8. Vietnam Expert Consensus
+{consensus_text}
+
+9. Key News
 {build_vn_global_news_brief(news_df, 4, 4)}
 """
 
 
-def generate_morning_note(api_key: str, model: str, note_date: str, bias: str, market_df: pd.DataFrame, news_df: pd.DataFrame, user_news: str, expert_notes: str, allocation_text: str) -> str:
+def generate_morning_note(api_key: str, model: str, note_date: str, bias: str, market_df: pd.DataFrame, news_df: pd.DataFrame, user_news: str, expert_notes: str, allocation_text: str, consensus_text: str) -> str:
     system_prompt = """You are a senior CIO strategist.
 Write a STRICTLY BILINGUAL Vietnamese-English Morning Note.
-Focus on interpretation, portfolio action, and cross-asset implications.
+Do not summarize headlines only. Explain why it matters, so what for portfolios, and include cross-asset implications.
 """
     user_prompt = f"""
 Date: {note_date}
@@ -806,58 +1243,76 @@ SIGNALS:
 EXPERT NOTES:
 {build_expert_fund_summary(expert_notes)}
 
+VIETNAM CONSENSUS:
+{consensus_text}
+
 ALLOCATION:
 {allocation_text}
 
 USER NOTES:
 {normalize_text(user_news)[:700]}
 """
-    out = cached_ai_call(api_key, model, system_prompt, user_prompt, 1800)
-    return out if out else fallback_morning_note(note_date, bias, news_df, expert_notes, allocation_text)
+    out = cached_ai_call(api_key, model, system_prompt, user_prompt, 1900)
+    return out if out else fallback_morning_note(note_date, bias, news_df, expert_notes, allocation_text, consensus_text)
 
 
-def generate_closing_note(api_key: str, model: str, note_date: str, market_df: pd.DataFrame, news_df: pd.DataFrame, expert_notes: str, allocation_text: str) -> str:
+def generate_closing_note(api_key: str, model: str, note_date: str, market_df: pd.DataFrame, news_df: pd.DataFrame, expert_notes: str, allocation_text: str, consensus_text: str) -> str:
     system_prompt = """You are an end-of-day strategist.
-Write a STRICTLY BILINGUAL Vietnamese-English Closing Note.
+Write a STRICTLY BILINGUAL Vietnamese-English Closing Note with portfolio implications.
 """
     user_prompt = f"""
 Date: {note_date}
+
 MARKET:
 {build_market_highlights(market_df)}
+
 NEWS:
 {build_vn_global_news_brief(news_df, 4, 4)}
+
 EXPERT NOTES:
 {build_expert_fund_summary(expert_notes)}
-ALLOCATION:
-{allocation_text}
-"""
-    out = cached_ai_call(api_key, model, system_prompt, user_prompt, 1800)
-    return out if out else fallback_closing_note(note_date, news_df, expert_notes, allocation_text)
 
+VIETNAM CONSENSUS:
+{consensus_text}
 
-def generate_ic_note(api_key: str, model: str, note_date: str, market_df: pd.DataFrame, news_df: pd.DataFrame, expert_notes: str, allocation_text: str) -> str:
-    system_prompt = """You are a PM strategist writing for CIO and Investment Committee.
-Write a STRICTLY BILINGUAL Vietnamese-English IC Note.
-"""
-    user_prompt = f"""
-Date: {note_date}
-MARKET:
-{build_market_highlights(market_df)}
-NEWS:
-{build_vn_global_news_brief(news_df, 4, 4)}
-EXPERT NOTES:
-{build_expert_fund_summary(expert_notes)}
 ALLOCATION:
 {allocation_text}
 """
     out = cached_ai_call(api_key, model, system_prompt, user_prompt, 1900)
-    return out if out else fallback_ic_note(note_date, news_df, expert_notes, allocation_text)
+    return out if out else fallback_closing_note(note_date, news_df, expert_notes, allocation_text, consensus_text)
+
+
+def generate_ic_note(api_key: str, model: str, note_date: str, market_df: pd.DataFrame, news_df: pd.DataFrame, expert_notes: str, allocation_text: str, consensus_text: str) -> str:
+    system_prompt = """You are a PM strategist writing for CIO and Investment Committee.
+Write a STRICTLY BILINGUAL Vietnamese-English IC Note.
+Be tactical and strategic. Include risks, catalysts, conviction, and portfolio fit.
+"""
+    user_prompt = f"""
+Date: {note_date}
+
+MARKET:
+{build_market_highlights(market_df)}
+
+NEWS:
+{build_vn_global_news_brief(news_df, 4, 4)}
+
+EXPERT NOTES:
+{build_expert_fund_summary(expert_notes)}
+
+VIETNAM CONSENSUS:
+{consensus_text}
+
+ALLOCATION:
+{allocation_text}
+"""
+    out = cached_ai_call(api_key, model, system_prompt, user_prompt, 2000)
+    return out if out else fallback_ic_note(note_date, news_df, expert_notes, allocation_text, consensus_text)
 
 
 # =========================================================
 # EXPORT
 # =========================================================
-def export_note_to_docx(title: str, content: str) -> bytes | None:
+def export_note_to_docx(title: str, content: str) -> Optional[bytes]:
     if Document is None:
         return None
     doc = Document()
@@ -870,7 +1325,7 @@ def export_note_to_docx(title: str, content: str) -> bytes | None:
     return bio.read()
 
 
-def export_note_to_pdf(title: str, content: str) -> bytes | None:
+def export_note_to_pdf(title: str, content: str) -> Optional[bytes]:
     if canvas is None or A4 is None:
         return None
     buffer = io.BytesIO()
@@ -882,13 +1337,13 @@ def export_note_to_pdf(title: str, content: str) -> bytes | None:
     y -= 24
     c.setFont("Helvetica", 10)
     for raw_line in content.split("\n"):
-        line = raw_line[:120]
-        if y < 40:
-            c.showPage()
-            y = height - 40
-            c.setFont("Helvetica", 10)
-        c.drawString(40, y, line)
-        y -= 14
+        for chunk in [raw_line[i:i+110] for i in range(0, len(raw_line), 110)] or [""]:
+            if y < 40:
+                c.showPage()
+                y = height - 40
+                c.setFont("Helvetica", 10)
+            c.drawString(40, y, chunk)
+            y -= 14
     c.save()
     buffer.seek(0)
     return buffer.read()
@@ -931,7 +1386,11 @@ def log_email_send(send_time: str, sender: str, recipients: List[str], subject: 
 
 
 def save_market_history(note_date: str, morning_note: str = "", closing_note: str = "") -> None:
-    append_csv_row(MARKET_HISTORY_FILE, {"Date": note_date, "MorningNote": morning_note[:6000], "ClosingNote": closing_note[:6000]})
+    append_csv_row(MARKET_HISTORY_FILE, {
+        "Date": note_date,
+        "MorningNote": morning_note[:6000],
+        "ClosingNote": closing_note[:6000],
+    })
 
 
 def save_ic_history(note_date: str, ic_note: str) -> None:
@@ -964,22 +1423,41 @@ def run_all_pipeline(api_key: str, model: str, report_date: str, cfg: dict, user
     news_df = fetch_rss_news(RSS_FEEDS, max_per_feed=6)
     news_df_ai = filter_news_for_ai(news_df, smart_mode=cfg.get("smart_mode", True))
 
-    allocation = compute_portfolio_allocation(market_df, news_df_ai)
-    allocation_text = format_allocation(allocation)
+    consensus_df = summarize_vn_expert_recommendations(VN_EXPERT_RECOMMENDATIONS)
+    consensus_text = build_vn_consensus_text(consensus_df)
 
-    trade_ideas_df = generate_ranked_trade_ideas(market_df, news_df_ai, int(cfg.get("trade_ideas_count", 7)))
-    trade_ideas_text = format_trade_ideas_df(trade_ideas_df)
+    allocation = compute_portfolio_allocation_v64(market_df, news_df_ai, consensus_df)
+    allocation_text = format_allocation_v64(allocation)
 
-    morning_note = generate_morning_note(api_key, model, report_date, cfg.get("house_view", "Neutral"), market_df, news_df_ai, user_news, expert_notes, allocation_text)
-    closing_note = generate_closing_note(api_key, model, report_date, market_df, news_df_ai, expert_notes, allocation_text)
-    ic_note = generate_ic_note(api_key, model, report_date, market_df, news_df_ai, expert_notes, allocation_text)
+    trade_ideas_df = generate_ranked_trade_ideas_v64(
+        market_df,
+        news_df_ai,
+        int(cfg.get("trade_ideas_count", 8)),
+        consensus_df
+    )
+    trade_ideas_text = format_trade_ideas_v64(trade_ideas_df) + "\n\n" + consensus_text
 
-    email_subject, email_body = build_email_bundle(api_key, model, report_date, "MANUAL", morning_note, ic_note, trade_ideas_text, allocation_text)
+    morning_note = generate_morning_note(
+        api_key, model, report_date, cfg.get("house_view", "Neutral"),
+        market_df, news_df_ai, user_news, expert_notes, allocation_text, consensus_text
+    )
+    closing_note = generate_closing_note(
+        api_key, model, report_date, market_df, news_df_ai, expert_notes, allocation_text, consensus_text
+    )
+    ic_note = generate_ic_note(
+        api_key, model, report_date, market_df, news_df_ai, expert_notes, allocation_text, consensus_text
+    )
+
+    email_subject, email_body = build_email_bundle(
+        api_key, model, report_date, "MANUAL",
+        morning_note, ic_note, trade_ideas_text, allocation_text
+    )
 
     return {
         "market_df": market_df,
         "news_df": news_df,
         "news_df_ai": news_df_ai,
+        "consensus_df": consensus_df,
         "allocation_text": allocation_text,
         "trade_ideas_df": trade_ideas_df,
         "morning_note": morning_note,
@@ -992,7 +1470,7 @@ def run_all_pipeline(api_key: str, model: str, report_date: str, cfg: dict, user
 
 
 # =========================================================
-# AUTO SCHEDULE 09:00
+# AUTO SEND 09:00
 # =========================================================
 def scheduled_morning_job():
     cfg = load_config()
@@ -1000,7 +1478,6 @@ def scheduled_morning_job():
     sender = get_secret("SENDER_EMAIL", "")
     sender_pw = get_secret("SENDER_PASSWORD", "")
     model = cfg.get("model", DEFAULT_MODEL)
-
     groups = cfg.get("auto_send_groups", ["internal_morning"])
     recipients = get_emails_from_groups(groups)
     if not recipients:
@@ -1009,7 +1486,6 @@ def scheduled_morning_job():
     report_date = datetime.now().strftime("%Y-%m-%d")
     result = run_all_pipeline(api_key, model, report_date, cfg, cfg.get("auto_user_news", ""), cfg.get("auto_expert_notes", ""))
     subject, body = build_email_bundle(api_key, model, report_date, "09:00 AUTO", result["morning_note"], result["ic_note"], result["trade_ideas"], result["allocation_text"])
-
     ok, msg = send_email_yagmail(sender, sender_pw, recipients, subject, body)
     log_email_send(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), sender, recipients, subject, "OK" if ok else "ERROR", "" if ok else msg)
     save_market_history(report_date, result["morning_note"], result["closing_note"])
@@ -1024,9 +1500,8 @@ def start_scheduler_if_needed():
     cfg = load_config()
     if not cfg.get("auto_send_enabled", False):
         return
-    run_time = cfg.get("auto_send_time", "09:00")
     try:
-        hour, minute = [int(x) for x in run_time.split(":")]
+        hour, minute = [int(x) for x in cfg.get("auto_send_time", "09:00").split(":")]
     except Exception:
         hour, minute = 9, 0
     scheduler = BackgroundScheduler()
@@ -1036,7 +1511,7 @@ def start_scheduler_if_needed():
 
 
 # =========================================================
-# UI
+# SESSION / UI
 # =========================================================
 def init_session():
     defaults = {
@@ -1044,6 +1519,7 @@ def init_session():
         "market_df": pd.DataFrame(),
         "news_df": pd.DataFrame(),
         "news_df_ai": pd.DataFrame(),
+        "consensus_df": pd.DataFrame(),
         "trade_ideas_df": pd.DataFrame(),
         "allocation_text": "",
         "morning_note": "",
@@ -1058,6 +1534,32 @@ def init_session():
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
+
+
+def render_export_buttons(title: str, content: str, file_prefix: str):
+    if not content:
+        return
+    c1, c2 = st.columns(2)
+    with c1:
+        docx_bytes = export_note_to_docx(title, content)
+        if docx_bytes:
+            st.download_button(
+                "Export Word",
+                data=docx_bytes,
+                file_name=f"{file_prefix}.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True,
+            )
+    with c2:
+        pdf_bytes = export_note_to_pdf(title, content)
+        if pdf_bytes:
+            st.download_button(
+                "Export PDF",
+                data=pdf_bytes,
+                file_name=f"{file_prefix}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
 
 
 def login_screen():
@@ -1075,32 +1577,6 @@ def login_screen():
             st.error("Sai tài khoản hoặc mật khẩu.")
 
 
-def render_export_buttons(title_prefix: str, content: str, filename_prefix: str):
-    if not content:
-        return
-    c1, c2 = st.columns(2)
-    with c1:
-        docx_bytes = export_note_to_docx(title_prefix, content)
-        if docx_bytes:
-            st.download_button(
-                "Export Word",
-                data=docx_bytes,
-                file_name=f"{filename_prefix}.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                use_container_width=True,
-            )
-    with c2:
-        pdf_bytes = export_note_to_pdf(title_prefix, content)
-        if pdf_bytes:
-            st.download_button(
-                "Export PDF",
-                data=pdf_bytes,
-                file_name=f"{filename_prefix}.pdf",
-                mime="application/pdf",
-                use_container_width=True,
-            )
-
-
 def admin_users_tab():
     st.markdown("### User Management")
     users = load_users()
@@ -1114,6 +1590,7 @@ def admin_users_tab():
     new_active = st.checkbox("Active", value=True, key="new_active")
 
     if st.button("Create User", use_container_width=True):
+        users = load_users()
         if new_username and new_password:
             if any(u.get("username") == new_username for u in users):
                 st.error("Username đã tồn tại.")
@@ -1131,6 +1608,7 @@ def admin_users_tab():
                 st.rerun()
 
     st.markdown("#### Cập nhật user")
+    users = load_users()
     if users:
         selected_username = st.selectbox("Chọn user", [u["username"] for u in users], key="edit_user_select")
         selected = next((u for u in users if u["username"] == selected_username), None)
@@ -1138,7 +1616,6 @@ def admin_users_tab():
             edit_role = st.selectbox("Role mới", ["admin", "analyst", "viewer"], index=["admin", "analyst", "viewer"].index(selected.get("role", "viewer")), key="edit_role")
             edit_active = st.checkbox("Active", value=selected.get("active", True), key="edit_active")
             reset_password = st.text_input("Reset password (nếu cần)", type="password", key="reset_password")
-
             if st.button("Update User", use_container_width=True):
                 for u in users:
                     if u["username"] == selected_username:
@@ -1155,11 +1632,11 @@ def admin_users_tab():
 def admin_groups_tab():
     st.markdown("### Recipient Groups")
     groups = load_recipient_groups()
-    group_rows = [{"Group": k, "Emails": ", ".join(v)} for k, v in groups.items()]
-    st.dataframe(pd.DataFrame(group_rows), use_container_width=True)
+    rows = [{"Group": k, "Emails": ", ".join(v)} for k, v in groups.items()]
+    st.dataframe(pd.DataFrame(rows), use_container_width=True)
 
     new_group_name = st.text_input("Tên nhóm mới", key="new_group_name")
-    new_group_emails = st.text_area("Emails (mỗi email cách nhau dấu phẩy)", key="new_group_emails")
+    new_group_emails = st.text_area("Emails (cách nhau bằng dấu phẩy)", key="new_group_emails")
     if st.button("Create / Update Group", use_container_width=True):
         if new_group_name.strip():
             groups[new_group_name.strip()] = [e.strip() for e in new_group_emails.replace("\n", ",").split(",") if e.strip()]
@@ -1188,13 +1665,12 @@ def admin_logs_tab():
         st.dataframe(pd.read_csv(EMAIL_LOG_FILE), use_container_width=True)
 
 
-def admin_schedule_tab(cfg: dict):
+def admin_scheduler_tab(cfg: dict):
     st.markdown("### Scheduler 09:00")
-    auto_send_enabled = st.checkbox("Bật auto gửi email", value=cfg.get("auto_send_enabled", False), key="auto_send_enabled")
-    auto_send_time = st.text_input("Giờ gửi tự động", value=cfg.get("auto_send_time", "09:00"), key="auto_send_time")
+    auto_send_enabled = st.checkbox("Bật auto gửi email", value=cfg.get("auto_send_enabled", False))
+    auto_send_time = st.text_input("Giờ gửi tự động", value=cfg.get("auto_send_time", "09:00"))
     groups = load_recipient_groups()
-    current_groups = cfg.get("auto_send_groups", ["internal_morning"])
-    auto_groups = st.multiselect("Nhóm nhận mail tự động", list(groups.keys()), default=[g for g in current_groups if g in groups], key="auto_groups")
+    auto_groups = st.multiselect("Nhóm nhận mail tự động", list(groups.keys()), default=[g for g in cfg.get("auto_send_groups", []) if g in groups])
     if st.button("Save Schedule", use_container_width=True):
         cfg["auto_send_enabled"] = auto_send_enabled
         cfg["auto_send_time"] = auto_send_time
@@ -1220,21 +1696,31 @@ def main_app():
     st.title(APP_TITLE)
     st.caption(f"Xin chào {current_user.get('full_name') or current_user.get('username')} | role: {current_user.get('role')}")
 
-    ctop1, ctop2 = st.columns([8, 1])
-    with ctop2:
+    top1, top2 = st.columns([8, 1])
+    with top2:
         if st.button("Logout"):
             log_audit(current_user.get("username", ""), "logout")
             st.session_state["current_user"] = None
             st.rerun()
 
     st.sidebar.title("⚙️ Cấu hình")
+    if not api_key:
+        st.sidebar.warning("Chưa có OPENAI_API_KEY trong secrets.")
+    if not sender_pw:
+        st.sidebar.warning("Chưa có SENDER_PASSWORD trong secrets.")
+
     model = st.sidebar.text_input("Model", value=cfg.get("model", DEFAULT_MODEL))
     report_date = str(st.sidebar.date_input("Ngày báo cáo"))
-    house_view = st.sidebar.selectbox("House View", ["Bullish", "Slightly Bullish", "Neutral", "Slightly Bearish", "Bearish"],
-                                      index=["Bullish", "Slightly Bullish", "Neutral", "Slightly Bearish", "Bearish"].index(cfg.get("house_view", "Neutral")))
+    house_view = st.sidebar.selectbox(
+        "House View",
+        ["Bullish", "Slightly Bullish", "Neutral", "Slightly Bearish", "Bearish"],
+        index=["Bullish", "Slightly Bullish", "Neutral", "Slightly Bearish", "Bearish"].index(cfg.get("house_view", "Neutral"))
+    )
     smart_mode = st.sidebar.checkbox("Smart mode", value=cfg.get("smart_mode", True))
+    if sender:
+        st.sidebar.caption(f"Email gửi đang dùng: {sender}")
     recipients_manual = st.sidebar.text_area("Recipients thủ công", value=recipients_default, height=80)
-    trade_ideas_count = st.sidebar.number_input("Trade ideas count", min_value=3, max_value=10, value=int(cfg.get("trade_ideas_count", 7)))
+    trade_ideas_count = st.sidebar.number_input("Trade ideas count", min_value=3, max_value=12, value=int(cfg.get("trade_ideas_count", 8)))
     auto_send_after_run_all = st.sidebar.checkbox("Run All xong tự gửi email", value=cfg.get("auto_send_after_run_all", False))
 
     if st.sidebar.button("💾 Lưu config"):
@@ -1263,6 +1749,7 @@ def main_app():
                 st.session_state["news_df_ai"] = filter_news_for_ai(news_df, smart_mode=smart_mode)
         with c3:
             if st.button("🚀 Run All", use_container_width=True):
+                cfg["trade_ideas_count"] = int(trade_ideas_count)
                 result = run_all_pipeline(api_key, model, report_date, cfg, st.session_state["user_news"], st.session_state["expert_notes"])
                 for k, v in result.items():
                     st.session_state[k] = v
@@ -1279,7 +1766,7 @@ def main_app():
 
                 st.success("Đã chạy xong toàn bộ pipeline.")
 
-    tab_names = ["Dashboard", "Notes", "Allocation", "Trade Ideas", "Email"]
+    tab_names = ["Dashboard", "Notes", "Allocation Deep Dive", "Trade Ideas", "Email"]
     if has_permission("manage_users") or has_permission("manage_groups") or has_permission("view_logs") or has_permission("manage_schedule"):
         tab_names += ["Users", "Recipient Groups", "Logs", "Scheduler"]
 
@@ -1311,15 +1798,13 @@ def main_app():
                 if not vn_df.empty:
                     vn_show = vn_df.copy()
                     vn_show["ArticleLink"] = vn_show["Link"].apply(lambda x: f'<a href="{x}" target="_blank">Mở bài</a>' if pd.notna(x) and str(x).strip() else "")
-                    show_cols = [c for c in ["Source", "Title", "AssetClass", "VNImpact", "ArticleLink"] if c in vn_show.columns]
-                    st.write(vn_show[show_cols].to_html(escape=False, index=False), unsafe_allow_html=True)
+                    st.write(vn_show[["Source", "Title", "AssetClass", "VNImpact", "ArticleLink"]].to_html(escape=False, index=False), unsafe_allow_html=True)
             with b:
                 st.markdown("#### Global News")
                 if not global_df.empty:
                     global_show = global_df.copy()
                     global_show["ArticleLink"] = global_show["Link"].apply(lambda x: f'<a href="{x}" target="_blank">Open article</a>' if pd.notna(x) and str(x).strip() else "")
-                    show_cols = [c for c in ["Source", "Title", "AssetClass", "VNImpact", "ArticleLink"] if c in global_show.columns]
-                    st.write(global_show[show_cols].to_html(escape=False, index=False), unsafe_allow_html=True)
+                    st.write(global_show[["Source", "Title", "AssetClass", "VNImpact", "ArticleLink"]].to_html(escape=False, index=False), unsafe_allow_html=True)
 
             st.text_area("Signals", build_top_actionable_signals(st.session_state["news_df_ai"], 5), height=120)
 
@@ -1328,62 +1813,81 @@ def main_app():
             a, b, c = st.columns(3)
             with a:
                 if st.button("Generate Morning Note", use_container_width=True):
-                    allocation_text = st.session_state.get("allocation_text", "")
-                    if not allocation_text and not st.session_state["market_df"].empty:
-                        st.session_state["allocation_text"] = format_allocation(compute_portfolio_allocation(st.session_state["market_df"], st.session_state["news_df_ai"]))
-                        allocation_text = st.session_state["allocation_text"]
-                    st.session_state["morning_note"] = generate_morning_note(api_key, model, report_date, house_view, st.session_state["market_df"], st.session_state["news_df_ai"], st.session_state["user_news"], st.session_state["expert_notes"], allocation_text)
-
+                    consensus_df = summarize_vn_expert_recommendations(VN_EXPERT_RECOMMENDATIONS)
+                    consensus_text = build_vn_consensus_text(consensus_df)
+                    allocation = compute_portfolio_allocation_v64(st.session_state["market_df"], st.session_state["news_df_ai"], consensus_df)
+                    allocation_text = format_allocation_v64(allocation)
+                    st.session_state["consensus_df"] = consensus_df
+                    st.session_state["allocation_text"] = allocation_text
+                    st.session_state["morning_note"] = generate_morning_note(api_key, model, report_date, house_view, st.session_state["market_df"], st.session_state["news_df_ai"], st.session_state["user_news"], st.session_state["expert_notes"], allocation_text, consensus_text)
             with b:
                 if st.button("Generate Closing Note", use_container_width=True):
-                    allocation_text = st.session_state.get("allocation_text", "")
-                    if not allocation_text and not st.session_state["market_df"].empty:
-                        st.session_state["allocation_text"] = format_allocation(compute_portfolio_allocation(st.session_state["market_df"], st.session_state["news_df_ai"]))
-                        allocation_text = st.session_state["allocation_text"]
-                    st.session_state["closing_note"] = generate_closing_note(api_key, model, report_date, st.session_state["market_df"], st.session_state["news_df_ai"], st.session_state["expert_notes"], allocation_text)
-
+                    consensus_df = summarize_vn_expert_recommendations(VN_EXPERT_RECOMMENDATIONS)
+                    consensus_text = build_vn_consensus_text(consensus_df)
+                    allocation = compute_portfolio_allocation_v64(st.session_state["market_df"], st.session_state["news_df_ai"], consensus_df)
+                    allocation_text = format_allocation_v64(allocation)
+                    st.session_state["consensus_df"] = consensus_df
+                    st.session_state["allocation_text"] = allocation_text
+                    st.session_state["closing_note"] = generate_closing_note(api_key, model, report_date, st.session_state["market_df"], st.session_state["news_df_ai"], st.session_state["expert_notes"], allocation_text, consensus_text)
             with c:
                 if st.button("Generate IC Note", use_container_width=True):
-                    allocation_text = st.session_state.get("allocation_text", "")
-                    if not allocation_text and not st.session_state["market_df"].empty:
-                        st.session_state["allocation_text"] = format_allocation(compute_portfolio_allocation(st.session_state["market_df"], st.session_state["news_df_ai"]))
-                        allocation_text = st.session_state["allocation_text"]
-                    st.session_state["ic_note"] = generate_ic_note(api_key, model, report_date, st.session_state["market_df"], st.session_state["news_df_ai"], st.session_state["expert_notes"], allocation_text)
+                    consensus_df = summarize_vn_expert_recommendations(VN_EXPERT_RECOMMENDATIONS)
+                    consensus_text = build_vn_consensus_text(consensus_df)
+                    allocation = compute_portfolio_allocation_v64(st.session_state["market_df"], st.session_state["news_df_ai"], consensus_df)
+                    allocation_text = format_allocation_v64(allocation)
+                    st.session_state["consensus_df"] = consensus_df
+                    st.session_state["allocation_text"] = allocation_text
+                    st.session_state["ic_note"] = generate_ic_note(api_key, model, report_date, st.session_state["market_df"], st.session_state["news_df_ai"], st.session_state["expert_notes"], allocation_text, consensus_text)
 
         if st.session_state["morning_note"]:
-            st.text_area("Morning Note", st.session_state["morning_note"], height=320)
+            st.text_area("Morning Note", st.session_state["morning_note"], height=340)
             if has_permission("export_notes"):
                 render_export_buttons("Morning Note", st.session_state["morning_note"], f"Morning_Note_{report_date}")
 
         if st.session_state["closing_note"]:
-            st.text_area("Closing Note", st.session_state["closing_note"], height=320)
+            st.text_area("Closing Note", st.session_state["closing_note"], height=340)
             if has_permission("export_notes"):
                 render_export_buttons("Closing Note", st.session_state["closing_note"], f"Closing_Note_{report_date}")
 
         if st.session_state["ic_note"]:
-            st.text_area("IC Note", st.session_state["ic_note"], height=380)
+            st.text_area("IC Note", st.session_state["ic_note"], height=420)
             if has_permission("export_notes"):
                 render_export_buttons("IC Note", st.session_state["ic_note"], f"IC_Note_{report_date}")
 
-    with tab_map["Allocation"]:
-        st.markdown("### Portfolio Allocation Engine")
-        if st.button("Compute Allocation", use_container_width=True):
-            allocation = compute_portfolio_allocation(st.session_state["market_df"], st.session_state["news_df_ai"])
-            st.session_state["allocation_text"] = format_allocation(allocation)
+    with tab_map["Allocation Deep Dive"]:
+        st.markdown("### Allocation Deep Dive v6.4")
+        if st.button("Compute Allocation Deep Dive", use_container_width=True):
+            consensus_df = summarize_vn_expert_recommendations(VN_EXPERT_RECOMMENDATIONS)
+            st.session_state["consensus_df"] = consensus_df
+            allocation = compute_portfolio_allocation_v64(st.session_state["market_df"], st.session_state["news_df_ai"], consensus_df)
+            st.session_state["allocation_text"] = format_allocation_v64(allocation)
+
         if st.session_state["allocation_text"]:
-            st.text_area("Allocation Output", st.session_state["allocation_text"], height=280)
+            st.text_area("Allocation Output", st.session_state["allocation_text"], height=420)
 
     with tab_map["Trade Ideas"]:
+        st.markdown("### Trade Ideas v6.4")
         if st.button("Generate Ranked Trade Ideas", use_container_width=True):
-            st.session_state["trade_ideas_df"] = generate_ranked_trade_ideas(st.session_state["market_df"], st.session_state["news_df_ai"], int(trade_ideas_count))
-            st.session_state["trade_ideas"] = format_trade_ideas_df(st.session_state["trade_ideas_df"])
+            consensus_df = summarize_vn_expert_recommendations(VN_EXPERT_RECOMMENDATIONS)
+            st.session_state["consensus_df"] = consensus_df
+            st.session_state["trade_ideas_df"] = generate_ranked_trade_ideas_v64(
+                st.session_state["market_df"],
+                st.session_state["news_df_ai"],
+                int(trade_ideas_count),
+                consensus_df
+            )
+            st.session_state["trade_ideas"] = format_trade_ideas_v64(st.session_state["trade_ideas_df"]) + "\n\n" + build_vn_consensus_text(consensus_df)
 
         if isinstance(st.session_state.get("trade_ideas_df"), pd.DataFrame) and not st.session_state["trade_ideas_df"].empty:
             st.dataframe(st.session_state["trade_ideas_df"], use_container_width=True)
 
+        if isinstance(st.session_state.get("consensus_df"), pd.DataFrame) and not st.session_state["consensus_df"].empty:
+            st.markdown("### Vietnam Expert Consensus Stocks")
+            st.dataframe(st.session_state["consensus_df"], use_container_width=True)
+
         if st.session_state["trade_ideas"]:
-            st.text_area("Trade Ideas", st.session_state["trade_ideas"], height=320)
-            st.text_area("Top Idea", extract_top_idea(st.session_state["trade_ideas"]), height=120)
+            st.text_area("Trade Ideas", st.session_state["trade_ideas"], height=420)
+            st.text_area("Top Idea", extract_top_idea(st.session_state["trade_ideas"]), height=140)
 
     with tab_map["Email"]:
         groups = load_recipient_groups()
@@ -1391,7 +1895,13 @@ def main_app():
         base_note = st.session_state["morning_note"] or st.session_state["closing_note"] or ""
 
         if st.button("Generate Email", use_container_width=True) and base_note:
-            subject, body = build_email_bundle(api_key, model, report_date, "MANUAL", base_note, st.session_state.get("ic_note", ""), st.session_state.get("trade_ideas", ""), st.session_state.get("allocation_text", ""))
+            subject, body = build_email_bundle(
+                api_key, model, report_date, "MANUAL",
+                base_note,
+                st.session_state.get("ic_note", ""),
+                st.session_state.get("trade_ideas", ""),
+                st.session_state.get("allocation_text", "")
+            )
             st.session_state["email_subject"] = subject
             st.session_state["email_body"] = body
 
@@ -1407,6 +1917,8 @@ def main_app():
                     log_email_send(report_date, sender, recipients_list, st.session_state["email_subject"], "OK" if ok else "ERROR", "" if ok else msg)
                     if ok:
                         st.success("Đã gửi email.")
+                    else:
+                        st.error(msg)
             with c2:
                 if st.button("Send to Selected Groups", use_container_width=True):
                     recipients_list = get_emails_from_groups(selected_groups)
@@ -1414,6 +1926,8 @@ def main_app():
                     log_email_send(report_date, sender, recipients_list, st.session_state["email_subject"], "OK" if ok else "ERROR", "" if ok else msg)
                     if ok:
                         st.success("Đã gửi email theo nhóm.")
+                    else:
+                        st.error(msg)
 
     if "Users" in tab_map:
         with tab_map["Users"]:
@@ -1433,7 +1947,7 @@ def main_app():
     if "Scheduler" in tab_map:
         with tab_map["Scheduler"]:
             if has_permission("manage_schedule"):
-                admin_schedule_tab(cfg)
+                admin_scheduler_tab(cfg)
 
 
 def main():
