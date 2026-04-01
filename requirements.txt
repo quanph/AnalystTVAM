@@ -4,3 +4,5 @@ openai
 yfinance
 yagmail
 feedparser
+python-docx
+reportlab
