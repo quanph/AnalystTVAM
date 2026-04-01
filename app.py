@@ -30,10 +30,7 @@ except Exception:
     canvas = None
 
 
-# =========================
-# CONFIG
-# =========================
-APP_TITLE = "CIO / PM Workbench v6.6"
+APP_TITLE = "PM Workbench"
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
 
@@ -104,7 +101,9 @@ Your job is to:
 - translate it into portfolio actions
 
 STRICT:
-- Bilingual Vietnamese – English
+- Output must be strictly bilingual Vietnamese-English
+- Every key point must appear in Vietnamese first, then English immediately after
+- Never output English only
 - No generic statements
 - Always include:
   1. What changed
@@ -120,9 +119,6 @@ STYLE:
 """
 
 
-# =========================
-# STORAGE / AUTH
-# =========================
 def load_json(path: Path, default):
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -157,9 +153,6 @@ def authenticate(username: str, password: str) -> Optional[dict]:
     return None
 
 
-# =========================
-# HELPERS
-# =========================
 def get_secret(name: str, default: str = "") -> str:
     try:
         return str(st.secrets.get(name, default))
@@ -229,9 +222,6 @@ def export_pdf(title: str, content: str) -> bytes | None:
     return buf.read()
 
 
-# =========================
-# DATA
-# =========================
 def fetch_market_snapshot(tickers: Dict[str, str]) -> pd.DataFrame:
     rows = []
     for name, ticker in tickers.items():
@@ -269,8 +259,11 @@ def fetch_news() -> pd.DataFrame:
                 link = entry.get("link", "")
                 txt = f"{title} {summary}".lower()
                 region = "Vietnam" if any(x in txt or x in source.lower() for x in ["vnindex", "vietnam", "viet", "vnexpress", "vietstock"]) else "Global"
-                asset = "Fixed Income" if any(x in txt for x in ["bond", "yield", "lãi suất", "fixed income"]) else \
-                        "Commodity / FX" if any(x in txt for x in ["oil", "gold", "usd", "fx", "tỷ giá"]) else "Equity"
+                asset = (
+                    "Fixed Income" if any(x in txt for x in ["bond", "yield", "lãi suất", "fixed income"])
+                    else "Commodity / FX" if any(x in txt for x in ["oil", "gold", "usd", "fx", "tỷ giá"])
+                    else "Equity"
+                )
                 impact = 1 + sum(int(k in txt) for k in ["vnindex", "usd", "oil", "fpt", "vcb", "mbb", "hpg"])
                 rows.append({
                     "Source": source,
@@ -314,9 +307,6 @@ def get_change(market_df: pd.DataFrame, name: str) -> float:
         return 0.0
 
 
-# =========================
-# CORE LOGIC
-# =========================
 def summarize_consensus() -> pd.DataFrame:
     df = pd.DataFrame(VN_EXPERT_RECOMMENDATIONS)
     out = []
@@ -573,14 +563,31 @@ Main risk:
 """
 
 
-# =========================
-# AI TEXT
-# =========================
-def generate_daily_note(api_key: str, model: str, note_date: str, market_df: pd.DataFrame, news_df: pd.DataFrame, allocation_text: str, consensus_text: str, user_notes: str) -> str:
+def generate_daily_note(
+    api_key: str,
+    model: str,
+    note_date: str,
+    market_df: pd.DataFrame,
+    news_df: pd.DataFrame,
+    allocation_text: str,
+    consensus_text: str,
+    user_notes: str,
+) -> str:
     system_prompt = PROMPT_MASTER + """
+You must write STRICTLY BILINGUAL output.
+
+MANDATORY FORMAT:
+- Every analytical point must be written in 2 lines:
+  Line 1: Vietnamese
+  Line 2: English
+- Do NOT write English only.
+- Do NOT group all Vietnamese first and all English later.
+- For every section, Vietnamese must appear immediately before its English translation.
+
 Write a DAILY INVESTMENT NOTE for CIO / PM.
 
-Structure:
+Required structure:
+
 1. Global Fixed Income
 2. Vietnam Fixed Income
 3. Global Equity
@@ -590,7 +597,15 @@ Structure:
 7. Top risks today
 8. Action summary
 
-Write bilingual Vietnamese-English.
+For sections 1-5, each section must include:
+- View
+- What changed
+- Why it matters
+- Portfolio implication
+- Risk
+- Trigger
+- Conviction
+- Time horizon
 """
     user_prompt = f"""
 Date: {note_date}
@@ -610,30 +625,67 @@ CONSENSUS:
 USER NOTES:
 {user_notes}
 """
-    out = cached_ai_call(api_key, model, system_prompt, user_prompt, 1600)
+    out = cached_ai_call(api_key, model, system_prompt, user_prompt, 2200)
     if out:
         return out
+
     return f"""DAILY NOTE / BẢN TIN NGÀY - {note_date}
 
-{build_news_brief(news_df)}
+1. Fixed Income toàn cầu giữ quan điểm trung lập do lợi suất còn biến động.
+Global fixed income remains neutral as yields are still volatile.
 
+2. Fixed Income Việt Nam cần theo dõi thêm thanh khoản và tỷ giá.
+Vietnam fixed income needs further monitoring of liquidity and FX.
+
+3. Equity toàn cầu thiên về chọn lọc hơn là tăng beta diện rộng.
+Global equity favors selective exposure rather than broad beta expansion.
+
+4. Equity Việt Nam phù hợp với large caps và các mã có đồng thuận cao.
+Vietnam equity is better suited to large caps and names with stronger consensus.
+
+5. Hàng hóa và FX tiếp tục là lớp tín hiệu quan trọng cho định vị ngắn hạn.
+Commodities and FX remain key signals for short-term positioning.
+
+6. Hàm ý danh mục:
+Portfolio implication:
 {allocation_text}
 
+7. Đồng thuận cổ phiếu Việt Nam:
+Vietnam stock consensus:
 {consensus_text}
 """
 
 
-def generate_ic_note(api_key: str, model: str, note_date: str, market_df: pd.DataFrame, news_df: pd.DataFrame, allocation_text: str, trade_ideas_text: str) -> str:
+def generate_ic_note(
+    api_key: str,
+    model: str,
+    note_date: str,
+    market_df: pd.DataFrame,
+    news_df: pd.DataFrame,
+    allocation_text: str,
+    trade_ideas_text: str,
+) -> str:
     system_prompt = PROMPT_MASTER + """
+You must write STRICTLY BILINGUAL output.
+
+MANDATORY FORMAT:
+- Every analytical point must be written in 2 lines:
+  Line 1: Vietnamese
+  Line 2: English
+- Do NOT write English only.
+- Do NOT group all Vietnamese first and all English later.
+- Vietnamese must be immediately followed by its English translation.
+
 Write a STRICTLY BILINGUAL IC NOTE.
-Include:
-- Base case
-- Bull case
-- Bear case
-- Portfolio implication
-- Top trade ideas
-- Risks
-- Decision points
+
+Required structure:
+1. Base case
+2. Bull case
+3. Bear case
+4. Portfolio implication
+5. Top trade ideas
+6. Key risks
+7. Decision points
 """
     user_prompt = f"""
 Date: {note_date}
@@ -650,13 +702,35 @@ ALLOCATION:
 TRADE IDEAS:
 {trade_ideas_text}
 """
-    out = cached_ai_call(api_key, model, system_prompt, user_prompt, 1800)
-    return out or f"IC NOTE / GHI CHÚ IC - {note_date}\n\n{allocation_text}\n\n{trade_ideas_text}"
+    out = cached_ai_call(api_key, model, system_prompt, user_prompt, 2200)
+    if out:
+        return out
+
+    return f"""IC NOTE / GHI CHÚ IC - {note_date}
+
+1. Kịch bản cơ sở là thị trường tiếp tục phân hóa, ưu tiên vị thế chọn lọc thay vì tăng beta mạnh.
+The base case is a still-divergent market, favoring selective exposure rather than aggressive beta expansion.
+
+2. Kịch bản tích cực là dòng tiền cải thiện và nhóm dẫn dắt duy trì sức mạnh.
+The bull case is improving flows with leadership groups maintaining strength.
+
+3. Kịch bản tiêu cực là USD mạnh hơn, lợi suất tăng và khẩu vị rủi ro suy yếu.
+The bear case is a stronger USD, higher yields, and weaker risk appetite.
+
+4. Hàm ý danh mục là giữ core exposure ở các tài sản có conviction cao và hạn chế đuổi giá.
+The portfolio implication is to maintain core exposure in high-conviction assets while avoiding chasing.
+
+5. Các ý tưởng nổi bật nên tập trung vào các mã có consensus tốt và phù hợp regime hiện tại.
+Top ideas should focus on names with strong consensus and alignment with the current regime.
+
+6. Rủi ro chính là biến động tỷ giá, lợi suất và độ rộng thị trường suy yếu.
+The main risks are FX volatility, yields, and weakening market breadth.
+
+7. Điểm quyết định là liệu động lượng thị trường có được xác nhận thêm bởi dòng tiền và leadership hay không.
+The decision point is whether market momentum is further confirmed by flows and leadership.
+"""
 
 
-# =========================
-# STREAMLIT UI
-# =========================
 def main():
     ensure_files()
     st.set_page_config(page_title=APP_TITLE, layout="wide")
@@ -728,11 +802,16 @@ def main():
         if "news_df" in st.session_state and not st.session_state["news_df"].empty:
             show = st.session_state["news_df"].copy()
             show["ArticleLink"] = show["Link"].apply(lambda x: f'<a href="{x}" target="_blank">Open</a>' if x else "")
-            st.write(show[["Region", "Source", "Title", "AssetClass", "VNImpact", "ArticleLink"]].to_html(escape=False, index=False), unsafe_allow_html=True)
+            st.write(
+                show[["Region", "Source", "Title", "AssetClass", "VNImpact", "ArticleLink"]].to_html(
+                    escape=False, index=False
+                ),
+                unsafe_allow_html=True,
+            )
 
     with tabs[1]:
         txt = st.session_state.get("daily_note", "")
-        st.text_area("Daily Note (Việt - Anh)", txt, height=500)
+        st.text_area("Daily Note (Việt - Anh)", txt, height=520)
         if txt:
             docx = export_docx("Daily Note", txt)
             pdf = export_pdf("Daily Note", txt)
@@ -784,7 +863,7 @@ def main():
 
     with tabs[8]:
         txt = st.session_state.get("ic_note", "")
-        st.text_area("IC Note", txt, height=500)
+        st.text_area("IC Note (Việt - Anh)", txt, height=520)
         if txt:
             docx = export_docx("IC Note", txt)
             pdf = export_pdf("IC Note", txt)
