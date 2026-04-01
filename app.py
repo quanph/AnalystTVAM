@@ -92,14 +92,14 @@ RSS_FEEDS = {
 }
 
 PROMPT_MASTER = """
-You are a CIO / Portfolio Manager at an institutional fund.
+You are a Portfolio Manager at an institutional fund.
 
 Your job is NOT to summarize news.
 Your job is to:
 - interpret market information
 - form an investment view
 - translate it into portfolio actions
-
+- Hãy giải thích chi tiết từng bước tư duy của bạn trước khi đưa ra kết quả cuối cùng
 STRICT:
 - Output must be strictly bilingual Vietnamese-English
 - Every key point must appear in Vietnamese first, then English immediately after
@@ -583,8 +583,8 @@ MANDATORY FORMAT:
 - Do NOT write English only.
 - Do NOT group all Vietnamese first and all English later.
 - For every section, Vietnamese must appear immediately before its English translation.
-
-Write a DAILY INVESTMENT NOTE for CIO / PM.
+- Hãy giải thích từng bước tư duy của bạn trước khi đưa ra kết quả cuối cùng
+Write a DAILY INVESTMENT NOTE for PM.
 
 Required structure:
 
