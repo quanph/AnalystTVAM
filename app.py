@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import hashlib
+import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -32,7 +33,7 @@ except Exception:
 # =========================
 # CONFIG
 # =========================
-APP_TITLE = "PM Workbench v6.6"
+APP_TITLE = "CIO / PM Workbench v6.6"
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
 
@@ -247,6 +248,16 @@ def fetch_market_snapshot(tickers: Dict[str, str]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def fetch_last_price_for_ticker(ticker: str) -> Optional[float]:
+    try:
+        hist = yf.Ticker(ticker).history(period="5d", interval="1d", auto_adjust=False)
+        if hist.empty:
+            return None
+        return float(hist.iloc[-1]["Close"])
+    except Exception:
+        return None
+
+
 def fetch_news() -> pd.DataFrame:
     rows = []
     for source, url in RSS_FEEDS.items():
@@ -370,43 +381,6 @@ def format_allocation(alloc: dict) -> str:
     return "\n".join(lines)
 
 
-def score_idea(asset: str, market_df: pd.DataFrame, consensus_df: pd.DataFrame) -> dict:
-    score = 5.0
-    why = []
-    if asset == "Oil" and get_change(market_df, "Oil (WTI)") > 1:
-        score += 2
-        why.append("Oil momentum strong / Động lượng dầu mạnh")
-    if asset == "Gold" and get_change(market_df, "Gold") > 0.5:
-        score += 1
-        why.append("Defensive demand / Nhu cầu phòng thủ")
-    if asset == "USD" and get_change(market_df, "USD Index") > 0.5:
-        score += 2
-        why.append("USD strength / USD mạnh")
-    if asset == "VNINDEX" and get_change(market_df, "VNINDEX") > 0.7:
-        score += 1.5
-        why.append("VN momentum / Động lượng VN")
-    if asset.endswith(".VN") and get_change(market_df, "VNINDEX") > 0.7:
-        score += 1.0
-    ticker_plain = asset.replace(".VN", "")
-    if not consensus_df.empty and ticker_plain in consensus_df["Ticker"].tolist():
-        score += 0.5
-        why.append("Expert consensus / Đồng thuận chuyên gia")
-
-    conviction = "High" if score >= 8 else "Medium" if score >= 6 else "Low"
-    action = "Buy" if score >= 8 else "Add" if score >= 7 else "Hold" if score >= 5 else "Trim" if score >= 4 else "Exit"
-    target = estimate_target_zone(asset, market_df)
-    fit = "Hedge" if asset in ["Gold", "USD"] else "Core + tactical" if asset in ["VNINDEX", "Global Equity"] else "Alpha / stock selection"
-    return {
-        "Asset": asset,
-        "Action": action,
-        "Score": round(min(score, 10), 1),
-        "Conviction": conviction,
-        "WhyNow": "; ".join(why) if why else "Neutral setup / Thiết lập trung tính",
-        "PortfolioFit": fit,
-        "TargetZone": target,
-    }
-
-
 def estimate_target_zone(asset: str, market_df: pd.DataFrame) -> str:
     if asset == "VNINDEX":
         row = market_df.loc[market_df["Asset"] == "VNINDEX"]
@@ -424,6 +398,46 @@ def estimate_target_zone(asset: str, market_df: pd.DataFrame) -> str:
     if asset == "USD":
         return "DXY +1% đến +3%"
     return "Tactical upside zone"
+
+
+def score_idea(asset: str, market_df: pd.DataFrame, consensus_df: pd.DataFrame) -> dict:
+    score = 5.0
+    why = []
+
+    if asset == "Oil" and get_change(market_df, "Oil (WTI)") > 1:
+        score += 2
+        why.append("Oil momentum strong / Động lượng dầu mạnh")
+    if asset == "Gold" and get_change(market_df, "Gold") > 0.5:
+        score += 1
+        why.append("Defensive demand / Nhu cầu phòng thủ")
+    if asset == "USD" and get_change(market_df, "USD Index") > 0.5:
+        score += 2
+        why.append("USD strength / USD mạnh")
+    if asset == "VNINDEX" and get_change(market_df, "VNINDEX") > 0.7:
+        score += 1.5
+        why.append("VN momentum / Động lượng VN")
+    if asset.endswith(".VN") and get_change(market_df, "VNINDEX") > 0.7:
+        score += 1.0
+
+    ticker_plain = asset.replace(".VN", "")
+    if not consensus_df.empty and ticker_plain in consensus_df["Ticker"].tolist():
+        score += 0.5
+        why.append("Expert consensus / Đồng thuận chuyên gia")
+
+    conviction = "High" if score >= 8 else "Medium" if score >= 6 else "Low"
+    action = "Buy" if score >= 8 else "Add" if score >= 7 else "Hold" if score >= 5 else "Trim" if score >= 4 else "Exit"
+    target = estimate_target_zone(asset, market_df)
+    fit = "Hedge" if asset in ["Gold", "USD"] else "Core + tactical" if asset in ["VNINDEX", "Global Equity"] else "Alpha / stock selection"
+
+    return {
+        "Asset": asset,
+        "Action": action,
+        "Score": round(min(score, 10), 1),
+        "Conviction": conviction,
+        "WhyNow": "; ".join(why) if why else "Neutral setup / Thiết lập trung tính",
+        "PortfolioFit": fit,
+        "TargetZone": target,
+    }
 
 
 def build_trade_ideas(market_df: pd.DataFrame, consensus_df: pd.DataFrame) -> pd.DataFrame:
